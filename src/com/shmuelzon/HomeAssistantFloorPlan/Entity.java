@@ -15,7 +15,7 @@ import com.eteks.sweethome3d.model.HomePieceOfFurniture;
 
 
 public class Entity implements Comparable<Entity> {
-    public enum Property {ALWAYS_ON, DISPLAY_FURNITURE_CONDITION, IS_RGB, POSITION,}
+    public enum Property {ALWAYS_ON, DISPLAY_FURNITURE_CONDITION, IS_RGB, POSITION, SCALE_FACTOR}
     public enum DisplayType {BADGE, ICON, LABEL}
     public enum Action {MORE_INFO, NAVIGATE, NONE, TOGGLE}
     
@@ -45,6 +45,7 @@ public class Entity implements Comparable<Entity> {
     private static final String SETTING_NAME_TOP_POSITION = "topPosition";
     private static final String SETTING_NAME_OPACITY = "opacity";
     private static final String SETTING_NAME_BACKGROUND_COLOR = "backgroundColor";
+    private static final String SETTING_NAME_SCALE_FACTOR = "scaleFactor";
 
     // --- Fields ---
     private List<? extends HomePieceOfFurniture> piecesOfFurniture;
@@ -52,6 +53,7 @@ public class Entity implements Comparable<Entity> {
     private String name;
     private Point2d position;
     private int opacity;
+    private double scaleFactor;
     private String backgroundColor;
     private DisplayType displayType;
     private DisplayOperator displayOperator;
@@ -313,6 +315,21 @@ public class Entity implements Comparable<Entity> {
         return settings.get(name + "." + SETTING_NAME_OPACITY) != null;
     }
 
+    public double getScaleFactor() {
+        return scaleFactor;
+    }
+
+    public void setScaleFactor(double scaleFactor) {
+        double oldScaleFactor = this.scaleFactor;
+        this.scaleFactor = scaleFactor;
+        settings.setDouble(name + "." + SETTING_NAME_SCALE_FACTOR, scaleFactor);
+        propertyChangeSupport.firePropertyChange(Property.SCALE_FACTOR.name(), oldScaleFactor, scaleFactor);
+    }
+
+    public boolean isScaleFactorModified() {
+        return settings.get(name + "." + SETTING_NAME_SCALE_FACTOR) != null;
+    }
+
     public String getBackgrounColor() {
         return backgroundColor;
     }
@@ -348,6 +365,7 @@ public class Entity implements Comparable<Entity> {
         settings.set(name + "." + SETTING_NAME_TOP_POSITION, null);
         settings.set(name + "." + SETTING_NAME_OPACITY, null);
         settings.set(name + "." + SETTING_NAME_BACKGROUND_COLOR, null);
+        settings.set(name + "." + SETTING_NAME_SCALE_FACTOR, null);
         loadDefaultAttributes();
 
         propertyChangeSupport.firePropertyChange(Property.ALWAYS_ON.name(), oldAlwaysOn, alwaysOn);
@@ -413,13 +431,14 @@ public class Entity implements Comparable<Entity> {
             "      text-align: center\n" +
             "      background-color: %s\n" +
             "      opacity: %d%%\n" +
+            "      transform: scale(%.2f)\n" + // Added scale factor to style
             "    tap_action:\n" +
       "      action: %s\n" +
             "    double_tap_action:\n" +
             "      action: %s\n" +
             "    hold_action:\n" +
             "      action: %s\n",
-            displayTypeToYamlString.get(displayType), name, title, position.y, position.x, backgroundColor, opacity,
+            displayTypeToYamlString.get(displayType), name, title, position.y, position.x, backgroundColor, opacity, scaleFactor,
             actionYaml(tapAction, tapActionValue), actionYaml(doubleTapAction, doubleTapActionValue), actionYaml(holdAction, holdActionValue)
         );
 
@@ -534,6 +553,7 @@ public class Entity implements Comparable<Entity> {
         title = firstPiece.getDescription();
         opacity = settings.getInteger(name + "." + SETTING_NAME_OPACITY, 100);
         backgroundColor = settings.get(name + "." + SETTING_NAME_BACKGROUND_COLOR, "rgba(255, 255, 255, 0.3)");
+        scaleFactor = settings.getDouble(name + "." + SETTING_NAME_SCALE_FACTOR, 1.0);
         alwaysOn = settings.getBoolean(name + "." + SETTING_NAME_ALWAYS_ON, false);
         isRgb = settings.getBoolean(name + "." + SETTING_NAME_IS_RGB, false);
 

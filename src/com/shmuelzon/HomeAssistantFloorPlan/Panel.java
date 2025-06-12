@@ -146,6 +146,8 @@ public class Panel extends JPanel implements DialogView {
                 attributes.add(resource.getString("HomeAssistantFloorPlan.Panel.attributes.isRgb.text"));
             if (entity.getDisplayFurnitureCondition() != Entity.DisplayFurnitureCondition.ALWAYS)
                 attributes.add(resource.getString("HomeAssistantFloorPlan.Panel.attributes.displayByState.text"));
+            if (entity.getIsLight() && entity.getIsFanAssociated() && entity.getFanEntityName() != null && !entity.getFanEntityName().trim().isEmpty())
+                attributes.add(resource.getString("HomeAssistantFloorPlan.Panel.attributes.fanAssociated.text") + ": " + entity.getFanEntityName());
 
             return attributes;
         }
@@ -787,7 +789,14 @@ public class Panel extends JPanel implements DialogView {
     }
 
     private void openEntityOptionsPanel(Entity entity) {
-        EntityOptionsPanel entityOptionsPanel = new EntityOptionsPanel(preferences, entity);
+        List<String> fanEntityNames = new ArrayList<>();
+        if (controller != null && controller.getOtherEntities() != null) {
+            fanEntityNames = controller.getOtherEntities().stream()
+                                .filter(e -> e.getName() != null && e.getName().startsWith("fan."))
+                                .map(Entity::getName)
+                                .collect(Collectors.toList());
+        }
+        EntityOptionsPanel entityOptionsPanel = new EntityOptionsPanel(preferences, entity, fanEntityNames);
         entityOptionsPanel.displayView(this);
     }
 

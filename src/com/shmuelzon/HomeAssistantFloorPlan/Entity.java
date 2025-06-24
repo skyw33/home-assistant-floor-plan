@@ -2,6 +2,8 @@ package com.shmuelzon.HomeAssistantFloorPlan;
 
 import java.beans.PropertyChangeListener;
 import java.beans.PropertyChangeSupport;
+import java.util.ArrayList;
+import java.util.stream.Collectors;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map.Entry;
@@ -51,10 +53,12 @@ public class Entity implements Comparable<Entity> {
     private static final String SETTING_NAME_BACKGROUND_COLOR = "backgroundColor";
     private static final String SETTING_NAME_SCALE_FACTOR = "scaleFactor"; // Added missing constant
     private static final String SETTING_NAME_CLICKABLE_AREA_TYPE = "clickableAreaType";
+    private static final String SETTING_NAME_EXCLUDE_FROM_OVERLAP = "excludeFromOverlap";
     private static final String SETTING_NAME_ASSOCIATED_FAN_ENTITY_ID = "associatedFanEntityId";
     private static final String SETTING_NAME_FAN_COLOR = "fanColor";
     private static final String SETTING_NAME_SHOW_FAN_WHEN_OFF = "showFanWhenOff";
     private static final String SETTING_NAME_FAN_SIZE = "fanSize"; // Added FanSize setting constant
+    private static final String SETTING_NAME_FAN_OPACITY = "fanOpacity";
     private static final String SETTING_NAME_SHOW_BORDER_AND_BACKGROUND = "showBorderAndBackground";
     private static final String SETTING_NAME_LABEL_COLOR = "labelColor";
     private static final String SETTING_NAME_LABEL_TEXT_SHADOW = "labelTextShadow";
@@ -89,6 +93,7 @@ public class Entity implements Comparable<Entity> {
     private FanColor fanColor;
     private boolean showFanWhenOff;
     private FanSize fanSize; // Added FanSize field
+    private int fanOpacity;
     private boolean showBorderAndBackground;
     private boolean alwaysOn;
     private boolean isRgb;
@@ -101,6 +106,7 @@ public class Entity implements Comparable<Entity> {
     private String labelTextShadow;
     private String labelFontWeight;
     private String labelSuffix;
+    private boolean excludeFromOverlap;
 
     public Entity(Settings settings, List<? extends HomePieceOfFurniture> piecesOfFurniture, ResourceBundle resourceBundle) {
         this.settings = settings;
@@ -438,6 +444,16 @@ public class Entity implements Comparable<Entity> {
         propertyChangeSupport.firePropertyChange(Property.SCALE_FACTOR.name(), oldScaleFactor, scaleFactor);
     }
 
+    public boolean isExcludedFromOverlap() {
+        return excludeFromOverlap;
+    }
+
+    public void setExcludeFromOverlap(boolean excludeFromOverlap) {
+        this.excludeFromOverlap = excludeFromOverlap;
+        settings.setBoolean(getSettingKey(SETTING_NAME_EXCLUDE_FROM_OVERLAP), excludeFromOverlap);
+    }
+
+
     public boolean isScaleFactorModified() {
         return settings.get(getSettingKey(SETTING_NAME_SCALE_FACTOR)) != null;
     }
@@ -479,6 +495,23 @@ public class Entity implements Comparable<Entity> {
 
     public boolean isFanSizeModified() {
         return settings.get(getSettingKey(SETTING_NAME_FAN_SIZE)) != null;
+    }
+
+    public int getFanOpacity() {
+        return fanOpacity;
+    }
+
+    public void setFanOpacity(int fanOpacity) {
+        this.fanOpacity = fanOpacity;
+        settings.setInteger(getSettingKey(SETTING_NAME_FAN_OPACITY), fanOpacity);
+    }
+
+    public boolean isFanOpacityModified() {
+        return settings.get(getSettingKey(SETTING_NAME_FAN_OPACITY)) != null;
+    }
+
+    public double getDefaultIconBadgeBaseSizePercent() {
+        return this.defaultIconBadgeBaseSizePercent;
     }
 
 
@@ -565,11 +598,13 @@ public class Entity implements Comparable<Entity> {
         settings.set(getSettingKey(SETTING_NAME_SHOW_FAN_WHEN_OFF), null);
         settings.set(getSettingKey(SETTING_NAME_FAN_COLOR), null);
         settings.set(getSettingKey(SETTING_NAME_FAN_SIZE), null); // Reset FanSize
+        settings.set(getSettingKey(SETTING_NAME_FAN_OPACITY), null);
         settings.set(getSettingKey(SETTING_NAME_SHOW_BORDER_AND_BACKGROUND), null);
         settings.set(getSettingKey(SETTING_NAME_LABEL_COLOR), null);
         settings.set(getSettingKey(SETTING_NAME_LABEL_TEXT_SHADOW), null);
         settings.set(getSettingKey(SETTING_NAME_LABEL_FONT_WEIGHT), null);
         settings.set(getSettingKey(SETTING_NAME_LABEL_SUFFIX), null);
+        settings.set(getSettingKey(SETTING_NAME_EXCLUDE_FROM_OVERLAP), null);
         loadDefaultAttributes();
 
         propertyChangeSupport.firePropertyChange(Property.ALWAYS_ON.name(), oldAlwaysOn, alwaysOn);
@@ -624,75 +659,99 @@ public class Entity implements Comparable<Entity> {
         return yaml;
     }
 
-    public String buildYaml(Controller controller) { // Pass controller to get room bounds
+    public List<String> buildYaml(Controller controller) { // Pass controller to get room bounds
         final Map<DisplayType, String> displayTypeToYamlString = new HashMap<DisplayType, String>() {{
             put(DisplayType.BADGE, "state-badge");
             put(DisplayType.ICON, "state-icon");
             put(DisplayType.LABEL, "state-label");
         }};
 
+        // Calculate the final size for icons/badges as a percentage of the card's dimensions.
+        // This is done by taking a base percentage and multiplying it by the user-defined scaleFactor.
+        // This makes the icons responsive to the viewing size (desktop vs. mobile).
+        double scaledIconBadgeSizePercent = defaultIconBadgeBaseSizePercent * scaleFactor;
+
 
         // Use the new displayOperator logic
-        if (this.displayOperator == DisplayOperator.NEVER && !getAlwaysOn()) {
-            return "";
+        // If the entity is configured to never be displayed, or is an "always on" light (which has no icon)
+        if (this.displayOperator == DisplayOperator.NEVER || getAlwaysOn()) {
+            return new ArrayList<>(); // Return empty list if never displayed
         }
 
-        String elementYaml;
+        List<String> elements = new ArrayList<>(); // This will hold all generated YAML elements for this entity
+        List<String> conditionalElements = new ArrayList<>(); // Elements that go inside a conditional block
+
+         //Determine if this entity needs a separate background element for its border/background
+        boolean needsSeparateBackground = (displayType == DisplayType.ICON || displayType == DisplayType.BADGE || displayType == DisplayType.ICON_AND_ANIMATED_FAN) && this.showBorderAndBackground;
 
         if (displayType == DisplayType.ICON_AND_ANIMATED_FAN) {
-            DisplayType iconPartDisplayType = DisplayType.ICON; // Default to ICON for the icon part
+             //--- Generate Background/Border Element if needed (for ICON_AND_ANIMATED_FAN) ---
+            if (needsSeparateBackground) {
+                conditionalElements.add(generateBackgroundElementYaml(position, scaleFactor, backgroundColor, tapAction, tapActionValue, doubleTapAction, doubleTapActionValue, holdAction, holdActionValue, associatedFanEntityId, name, id, this.blinking, this.opacity));
+            }
 
-            String iconYamlString = displayTypeToYamlString.get(iconPartDisplayType);
-            if (iconYamlString == null) iconYamlString = "state-icon"; // Fallback
-
+            // --- Generate the Icon part of ICON_AND_ANIMATED_FAN ---
             StringBuilder iconStyleProperties = new StringBuilder();
             iconStyleProperties.append(String.format(Locale.US, "      top: %.2f%%\n", position.y));
             iconStyleProperties.append(String.format(Locale.US, "      left: %.2f%%\n", position.x));
-            // For ICON_AND_ANIMATED_FAN, the icon part might not always need a circular background if the fan is the main visual.
-            if (this.showBorderAndBackground) {
-                iconStyleProperties.append("      border-radius: 50%\n"); 
-                iconStyleProperties.append(String.format(Locale.US, "      background-color: %s\n", backgroundColor));
-            }
-            iconStyleProperties.append("      text-align: center\n"); // Keep for potential text in future icon types
+            iconStyleProperties.append("      position: absolute\n"); // Ensure absolute positioning
+            iconStyleProperties.append("      transform: translate(-50%, -50%)\n");
+
+            // Set a responsive font-size, which will serve as the base for scaling all em-based units.
+            // Using calc() adds a fixed base size to the scalable vw unit. This prevents icons from
+            // becoming too small on narrow screens while still allowing them to grow on wider screens.
+            double iconSizeVw = 2.0 * scaleFactor;
+            double iconSizePx = 10.0 * scaleFactor;
+            iconStyleProperties.append(String.format(Locale.US, "      --mdc-icon-size: calc(%.2fvw + %.2fpx)\n", iconSizeVw, iconSizePx));
             
-            String iconVisualElementTransform = "translate(-50%, -50%)";
+            // Icon part is not clickable if background handles it, otherwise it should be clickable
+            if (needsSeparateBackground) {
+                iconStyleProperties.append("      pointer-events: none\n");
+            }
+
+            // No background/border styling here, as it's handled by the separate image element
             if (blinking) {
                 iconStyleProperties.append("      animation: my-blink 1s linear infinite\n");
             } else {
                 iconStyleProperties.append(String.format(Locale.US, "      opacity: %d%%\n", opacity));
             }
 
-            // For ICON_AND_ANIMATED_FAN, let HA size the icon, apply scaleFactor via transform
-            // No explicit width/height for the icon part
-            if (Math.abs(scaleFactor - 1.0) > 0.001) { // Only add scale if not 1.0
-                iconVisualElementTransform += String.format(Locale.US, " scale(%.2f)", scaleFactor);
+            String iconElementYaml;
+            String attributePart = (this.attribute != null && !this.attribute.isEmpty() ? "    attribute: " + this.attribute + "\n" : "");
+            String titlePart = "    title: " + (title != null ? title : "null") + "\n";
+
+            if (needsSeparateBackground) {
+                iconElementYaml = String.format(Locale.US,
+                    "  - type: state-icon\n" +
+                    "    entity: %s\n" +
+                    attributePart +
+                    titlePart +
+                    "    style:\n" +
+                    "%s",
+                    name,
+                    iconStyleProperties.toString());
+            } else {
+                iconElementYaml = String.format(Locale.US,
+                    "  - type: state-icon\n" +
+                    "    entity: %s\n" +
+                    attributePart +
+                    titlePart +
+                    "    tap_action:\n" +
+                    "      action: %s\n" +
+                    "    double_tap_action:\n" +
+                    "      action: %s\n" +
+                    "    hold_action:\n" +
+                    "      action: %s\n" +
+                    "    style:\n" +
+                    "%s",
+                    name,
+                    actionYaml(tapAction, tapActionValue, this.associatedFanEntityId),
+                    actionYaml(doubleTapAction, doubleTapActionValue, this.associatedFanEntityId),
+                    actionYaml(holdAction, holdActionValue, this.associatedFanEntityId),
+                    iconStyleProperties.toString());
             }
-            iconStyleProperties.append(String.format(Locale.US, "      transform: %s\n", iconVisualElementTransform)); // No quotes, no semicolon
 
-            
-            if (clickableAreaType == ClickableAreaType.ROOM_SIZE) {
-                 iconStyleProperties.append("      pointer-events: none;\n");
-            }
-
-            String iconElementYaml = String.format(Locale.US,
-                "  - type: %s\n" +
-                "    entity: %s\n" +
-                (this.attribute != null && !this.attribute.isEmpty() ? "    attribute: " + this.attribute + "\n" : "") +
-                (iconPartDisplayType == DisplayType.BADGE ? "" : "    title: " + (title != null ? title : "null") + "\n") +
-                "    style:\n" +
-                "%s" +
-                "    tap_action:\n" +
-                "      action: %s\n" +
-                "    double_tap_action:\n" +
-                "      action: %s\n" +
-                "    hold_action:\n" +
-                "      action: %s\n",
-                iconYamlString, name,
-                iconStyleProperties.toString(),
-                actionYaml(tapAction, tapActionValue, this.associatedFanEntityId),
-                actionYaml(doubleTapAction, doubleTapActionValue, this.associatedFanEntityId),
-                actionYaml(holdAction, holdActionValue, this.associatedFanEntityId));
-
+            // --- Generate the Fan Image part of ICON_AND_ANIMATED_FAN ---
             String fanImageOn;
             String fanImageOffSuffix;
             if (this.fanColor == FanColor.WHITE) {
@@ -707,9 +766,9 @@ public class Entity implements Comparable<Entity> {
             StringBuilder fanStyleProperties = new StringBuilder();
             fanStyleProperties.append(String.format(Locale.US, "      top: %.2f%%\n", position.y));
             fanStyleProperties.append(String.format(Locale.US, "      left: %.2f%%\n", position.x));
+            fanStyleProperties.append("      position: absolute\n"); // Ensure absolute positioning
             // Calculate fan dimensions based on a 2:3 width:height aspect ratio
-            // Use FanSize to determine dimensions
-            double fanWidthPercent;
+            double fanWidthPercent; // This is the width of the fan image
             double fanHeightPercent;
             switch (this.fanSize) {
                 case SMALL: fanWidthPercent = 2.0; fanHeightPercent = 3.0; break;
@@ -718,12 +777,13 @@ public class Entity implements Comparable<Entity> {
                 default: fanWidthPercent = 4.0; fanHeightPercent = 5.0; break; // Default to Medium
             }
             // Apply scaleFactor to the chosen size
-            fanWidthPercent *= scaleFactor;
-            fanHeightPercent *= scaleFactor;
+            fanWidthPercent *= scaleFactor; // Apply scale factor to fan image dimensions
+            fanHeightPercent *= scaleFactor; // Apply scale factor to fan image dimensions
             fanStyleProperties.append(String.format(Locale.US, "      width: %.2f%%\n", fanWidthPercent)); // Use calculated width
             fanStyleProperties.append(String.format(Locale.US, "      height: %.2f%%\n", fanHeightPercent));
-            fanStyleProperties.append("      transform: translate(-50%, -50%);\n");
-            fanStyleProperties.append("      pointer-events: none;\n");
+            fanStyleProperties.append("      transform: translate(-50%, -50%)\n");
+            fanStyleProperties.append("      pointer-events: none\n"); // Fan image is not clickable
+            fanStyleProperties.append(String.format(Locale.US, "      opacity: %d%%\n", this.fanOpacity));
 
             String fanImageElementYaml = "";
             if (this.associatedFanEntityId != null && !this.associatedFanEntityId.trim().isEmpty()) {
@@ -741,22 +801,52 @@ public class Entity implements Comparable<Entity> {
                     fanImageOff,
                     fanStyleProperties.toString());
             }
-            // The fan image should come before the icon in YAML for better layering
-            // (icon on top of fan) and to address the request of having the
-            // non-interactive image part appear before the interactive icon part.
-            elementYaml = fanImageElementYaml + iconElementYaml;
-        } else {
+            // The fan image should come before the icon in YAML for proper layering
+            // (icon on top of fan).
+            conditionalElements.add(fanImageElementYaml);
+            conditionalElements.add(iconElementYaml); // Icon is layered on top of fan
+        } else { // Not ICON_AND_ANIMATED_FAN
+            // --- Generate Background/Border Element if needed (for ICON or BADGE) ---
+            if (needsSeparateBackground) {
+                conditionalElements.add(generateBackgroundElementYaml(position, scaleFactor, backgroundColor, tapAction, tapActionValue, doubleTapAction, doubleTapActionValue, holdAction, holdActionValue, associatedFanEntityId, name, id, this.blinking, this.opacity));
+            }
+
+            // --- Generate the main visual element (Icon, Badge, or Label) ---
             StringBuilder styleProperties = new StringBuilder();
             styleProperties.append(String.format(Locale.US, "      top: %.2f%%\n", position.y));
             styleProperties.append(String.format(Locale.US, "      left: %.2f%%\n", position.x));
-            String visualElementTransform = "translate(-50%, -50%)";
-            if (this.showBorderAndBackground && (displayType == DisplayType.ICON || displayType == DisplayType.BADGE)) {
-                styleProperties.append("      border-radius: 50%\n");
-                styleProperties.append(String.format(Locale.US, "      background-color: %s\n", backgroundColor));
+            styleProperties.append("      position: absolute\n"); // Ensure absolute positioning
+            styleProperties.append("      transform: translate(-50%, -50%)\n");
+            
+            // If there's a separate background element, this visual element should not be clickable
+            if (needsSeparateBackground) {
+                styleProperties.append("      pointer-events: none\n");
+            } else if (clickableAreaType == ClickableAreaType.ROOM_SIZE) {
+                styleProperties.append("      pointer-events: none\n"); // Room size clickable area handles clicks
             }
+
+            if (displayType == DisplayType.ICON || displayType == DisplayType.BADGE) { // Icon or Badge
+                // Using calc() adds a fixed base size to the scalable vw unit. This prevents icons from
+                // becoming too small on narrow screens while still allowing them to grow on wider screens.
+                double iconSizeVw = 2.0 * scaleFactor;
+                double iconSizePx = 10.0 * scaleFactor;
+                styleProperties.append(String.format(Locale.US, "      --mdc-icon-size: calc(%.2fvw + %.2fpx)\n", iconSizeVw, iconSizePx));
+                // No background/border styling here, as it's handled by the separate image element
+            }
+            
+            if (displayType == DisplayType.LABEL) {
+                // Add background and border if requested for labels. This is applied directly
+                // to the label element, allowing the background to size with the text content.
+                if (this.showBorderAndBackground) { // This condition is controlled by the "Border/Background" checkbox in the UI
+                    styleProperties.append(String.format(Locale.US, "      background: %s\n", this.backgroundColor));
+                    styleProperties.append("      border-radius: 50%\n"); // Make it circular/elliptical (fixed extra %)
+                    // Removed box-sizing: border-box as requested
+                }
+            }
+
             if (displayType == DisplayType.LABEL || displayType == DisplayType.BADGE) { // Badges can also have text
                 styleProperties.append("      text-align: center\n");
-            } // Note: background-color for LABEL might not be desired unless showBorderAndBackground is true.
+            }
 
             if (blinking) {
                 styleProperties.append("      animation: my-blink 1s linear infinite\n");
@@ -764,17 +854,8 @@ public class Entity implements Comparable<Entity> {
                  styleProperties.append(String.format(Locale.US, "      opacity: %d%%\n", opacity));
             }
 
-            // For ICON and BADGE, let HA size the element, apply scaleFactor via transform
-            // For LABEL, apply scaleFactor via transform and don't set explicit width/height
-            if (Math.abs(scaleFactor - 1.0) > 0.001) { // Only add scale if not 1.0
-                visualElementTransform += String.format(Locale.US, " scale(%.2f)", scaleFactor);
-                styleProperties.append(String.format(Locale.US, "      transform: %s\n", visualElementTransform)); // No quotes, no semicolon
-            } else if (displayType == DisplayType.ICON || displayType == DisplayType.BADGE || displayType == DisplayType.LABEL) {
-                // Ensure transform is always present for centering, even if scale is 1.0
-                styleProperties.append(String.format(Locale.US, "      transform: %s\n", visualElementTransform)); // No quotes, no semicolon
-            }
-
             if (displayType == DisplayType.LABEL) {
+
                 if (labelColor != null && !labelColor.trim().isEmpty()) {
                     styleProperties.append(String.format(Locale.US, "      color: %s\n", labelColor));
                 }
@@ -784,34 +865,30 @@ public class Entity implements Comparable<Entity> {
                 if (labelFontWeight != null && !labelFontWeight.trim().isEmpty()) {
                     styleProperties.append(String.format(Locale.US, "      font-weight: %s\n", labelFontWeight));
                 }
+                // Using calc() for labels provides a minimum font size and prevents text from becoming
+                // too small on narrow screens, improving readability.
+                double scaledFontVw = 0.8 * scaleFactor;
+                double scaledFontPx = 5.0 * scaleFactor;
+                styleProperties.append(String.format(Locale.US, "      font-size: calc(%.2fvw + %.2fpx)\n", scaledFontVw, scaledFontPx));
             }
-             if (clickableAreaType == ClickableAreaType.ROOM_SIZE && displayType != DisplayType.ICON_AND_ANIMATED_FAN) { // visual element non-clickable unless it's the room itself
-                styleProperties.append("      pointer-events: none;\n");
-            }
-
+            
             // Prepare conditional parts as arguments for String.format
-            // These will be substituted into %s placeholders.
             String attributeString = (this.attribute != null && !this.attribute.isEmpty())
                                    ? String.format("    attribute: %s\n", this.attribute) : "";
 
             String suffixString = "";
             if (displayType == DisplayType.LABEL) {
                 if (labelSuffix != null && !labelSuffix.trim().isEmpty()) {
-                    // For the inner String.format("suffix: '%s'", ...), if labelSuffix contains a literal '%'
-                    // it should be escaped as '%%' if it were part of the format string.
-                    // However, as an argument to %s, it's usually literal.
-                    // The .replace("'", "''") is for YAML single-quoted strings containing single quotes.
                     suffixString = String.format("    suffix: '%s'\n", labelSuffix.replace("'", "''"));
                 } else if (this.attribute != null && !this.attribute.isEmpty()) {
-                    // Default suffix when attribute is present and no custom suffix
-                    suffixString = "    suffix: '°'\n"; // Literal single quotes are fine here
+                    suffixString = "    suffix: '°'\n";
                 }
             }
 
             String titleString = (displayType == DisplayType.BADGE) ? ""
                                : String.format("    title: %s\n", (title != null ? title : "null"));
 
-            elementYaml = String.format(Locale.US,
+            String mainVisualElementYaml = String.format(Locale.US,
                 "  - type: %s\n" +
                 "    entity: %s\n" +
                 "%s" + // attributeString
@@ -826,22 +903,19 @@ public class Entity implements Comparable<Entity> {
                 "    hold_action:\n" +
                 "      action: %s\n",
                 displayTypeToYamlString.get(displayType), name,
-                attributeString, suffixString, titleString, // Pass pre-formatted strings as arguments
+                attributeString, suffixString, titleString,
                 styleProperties.toString(),
                 actionYaml(tapAction, tapActionValue, this.associatedFanEntityId),
                 actionYaml(doubleTapAction, doubleTapActionValue, this.associatedFanEntityId),
                 actionYaml(holdAction, holdActionValue, this.associatedFanEntityId));
+            conditionalElements.add(mainVisualElementYaml);
         }
 
-        String clickableAreaYaml = "";
+        // --- Clickable Area (Room Size) ---
+        String clickableAreaYaml = ""; // This will be added as a separate top-level element
         if (clickableAreaType == ClickableAreaType.ROOM_SIZE && controller != null) {
             Map<String, Double> roomBounds = controller.getRoomBoundingBoxPercent(this);
             if (roomBounds != null) {
-                System.out.println(String.format(Locale.US, 
-                    "DEBUG Entity.java: For entity '%s', Icon Center (L:%.2f%%, T:%.2f%%). Controller-provided (shrunken) bounds: (L:%.2f%%, T:%.2f%%, W:%.2f%%, H:%.2f%%)",
-                    this.name, this.position.x, this.position.y,
-                    roomBounds.get("left"), roomBounds.get("top"), roomBounds.get("width"), roomBounds.get("height")
-                ));
                 // Check if the icon's center is within the calculated room bounds
                 double iconCenterY = this.position.y;
                 double iconCenterX = this.position.x;
@@ -899,11 +973,16 @@ public class Entity implements Comparable<Entity> {
                 pngWidthPx = Math.max(1, pngWidthPx);
                 pngHeightPx = Math.max(1, pngHeightPx);
 
-                String transparentImageBaseName = "transparent_" + this.name;
+                String baseNameForImage = this.name;
+                String fullImageName = "transparent_" + baseNameForImage;
+
                 try {
-                    controller.ensureEntityTransparentImageGenerated(this.name, pngWidthPx, pngHeightPx);
-                    String transparentImageHash = controller.renderHash(transparentImageBaseName, true);
-                    String transparentImagePath = "/local/floorplan/" + transparentImageBaseName + ".png?version=" + transparentImageHash;
+                    // ensureEntityTransparentImageGenerated prepends "transparent_" internally
+                    controller.ensureEntityTransparentImageGenerated(baseNameForImage, pngWidthPx, pngHeightPx);
+                    // renderHash needs the full name of the file that was created
+                    String transparentImageHash = controller.renderHash(fullImageName, true);
+                    // The path for Home Assistant also needs the full name
+                    String transparentImagePath = "/local/floorplan/" + fullImageName + ".png?version=" + transparentImageHash;
 
                     clickableAreaYaml = String.format(Locale.US,
                         "  - type: image\n" +
@@ -932,75 +1011,129 @@ public class Entity implements Comparable<Entity> {
                     System.err.println("Error generating/hashing transparent image for " + this.name + " with dimensions " + pngWidthPx + "x" + pngHeightPx + ": " + e.getMessage());
                 }
             }
-        }
-        elementYaml = clickableAreaYaml + elementYaml; // Prepend clickable area if it exists
+        } 
 
-        // Handle ALWAYS and NEVER operators explicitly
+        // Add clickable area as a separate element if it exists
+        if (!clickableAreaYaml.isEmpty()) {
+            elements.add(clickableAreaYaml);
+        }
+
+        // Handle ALWAYS operator or alwaysOn flag explicitly
         if (this.displayOperator == DisplayOperator.ALWAYS || getAlwaysOn()) { // Consider alwaysOn as well
-            return elementYaml;
+            elements.addAll(conditionalElements); // Add main visual elements directly
+        } else {
+            // If not ALWAYS and not forced by alwaysOn, then apply the conditional logic.
+            String conditionAttributePart = (this.attribute != null && !this.attribute.isEmpty())
+                                            ? String.format("        attribute: %s\n", this.attribute)
+                                            : "";
+
+            String conditionYaml;
+            switch (this.displayOperator) {
+                case IS:
+                    conditionYaml = String.format(
+                        "    conditions:\n" + // Ensure conditions block starts here
+                        "      - condition: state\n" +
+                        "        entity: %s\n" +
+                        conditionAttributePart +
+                        "        state: '%s'",
+                        name, this.displayValue);
+                    break;
+                case IS_NOT:
+                    conditionYaml = String.format(
+                        "    conditions:\n" +
+                        "      - condition: state\n" +
+                        "        entity: %s\n" +
+                        conditionAttributePart +
+                        "        state_not: '%s'",
+                        name, this.displayValue);
+                    break;
+                case GREATER_THAN:
+                    conditionYaml = String.format(
+                        "    conditions:\n" +
+                        "      - condition: numeric_state\n" +
+                        "        entity: %s\n" +
+                        conditionAttributePart +
+                        "        above: %s",
+                        name, this.displayValue);
+                    break;
+                case LESS_THAN:
+                    conditionYaml = String.format(
+                        "    conditions:\n" +
+                        "      - condition: numeric_state\n" +
+                        "        entity: %s\n" +
+                        conditionAttributePart +
+                        "        below: %s",
+                        name, this.displayValue);
+                    break;
+                default:
+                    // This case should ideally not be reached if ALWAYS/NEVER are handled above.
+                    // If it is reached, it means an unhandled operator. Return empty list.
+                    System.err.println("Warning: Unhandled display operator for entity " + name + ": " + this.displayOperator);
+                    return new ArrayList<>();
+            }
+
+            // Indent all elements that go inside the conditional block
+            String indentedConditionalElements = conditionalElements.stream()
+                                                    .map(s -> s.replaceAll("(?m)^", "    ")) // Add 4 spaces to each line
+                                                    .collect(Collectors.joining());
+
+            String conditionalBlock = String.format(
+                "  - type: conditional\n" +
+                "%s\n" +
+                "    elements:\n" +
+                "%s",
+                conditionYaml, // Use the generated conditionYaml
+                indentedConditionalElements
+            );
+            elements.add(conditionalBlock);
         }
 
-        if (this.displayOperator == DisplayOperator.NEVER && !getAlwaysOn()) { // If NEVER and not forced by alwaysOn
-            // If the operator is NEVER for the entity itself, the element should not appear.
-            // Returning an empty string prevents it from being added to the elements list.
-            return "";
+        return elements; // Return the list of all generated elements
+    }
+
+    /**
+     * Generates the YAML for a transparent image element that serves as a background/border.
+     * This element handles the sizing, background color, border-radius, and actions.
+     */
+    private String generateBackgroundElementYaml(Point2d position, double scaleFactor, String backgroundColor,
+                                                 Action tapAction, String tapActionValue, Action doubleTapAction, String doubleTapActionValue,
+                                                 Action holdAction, String holdActionValue, String associatedFanEntityId, String entityName, String entityId, boolean blinking, int opacity) {
+        StringBuilder backgroundStyleProperties = new StringBuilder();
+        backgroundStyleProperties.append(String.format(Locale.US, "      top: %.2f%%\n", position.y));
+        backgroundStyleProperties.append(String.format(Locale.US, "      left: %.2f%%\n", position.x));
+        backgroundStyleProperties.append("      position: absolute\n");
+        backgroundStyleProperties.append("      transform: translate(-50%, -50%)\n");
+
+        // Calculate the size of the background circle in vw units.
+        // This size should be large enough to contain the icon. We use calc() to keep it
+        // proportional to the icon's size across all screen widths.
+        double backgroundSizeVw = 3.0 * scaleFactor;
+        double backgroundSizePx = 15.0 * scaleFactor;
+        backgroundStyleProperties.append(String.format(Locale.US, "      --mdc-icon-size: calc(%.2fvw + %.2fpx)\n", backgroundSizeVw, backgroundSizePx));
+        // The color of the icon IS the background color.
+        backgroundStyleProperties.append(String.format(Locale.US, "      color: %s\n", backgroundColor));
+
+        if (blinking) {
+            backgroundStyleProperties.append("      animation: my-blink 1s linear infinite\n");
+        } else {
+            backgroundStyleProperties.append(String.format(Locale.US, "      opacity: %d%%\n", opacity));
         }
 
-        String conditionAttributePart = (this.attribute != null && !this.attribute.isEmpty())
-                                        ? String.format("        attribute: %s\n", this.attribute)
-                                        : "";
-
-        String conditionYaml;
-        switch (this.displayOperator) {
-            case IS:
-                conditionYaml = String.format(
-                    "    conditions:\n" + // Ensure conditions block starts here
-                    "      - condition: state\n" +
-                    "        entity: %s\n" +
-                    conditionAttributePart +
-                    "        state: '%s'",
-                    name, this.displayValue);
-                break;
-            case IS_NOT:
-                conditionYaml = String.format(
-                    "    conditions:\n" +
-                    "      - condition: state\n" +
-                    "        entity: %s\n" +
-                    conditionAttributePart +
-                    "        state_not: '%s'",
-                    name, this.displayValue);
-                break;
-            case GREATER_THAN:
-                conditionYaml = String.format(
-                    "    conditions:\n" +
-                    "      - condition: numeric_state\n" +
-                    "        entity: %s\n" +
-                    conditionAttributePart +
-                    "        above: %s",
-                    name, this.displayValue);
-                break;
-            case LESS_THAN:
-                conditionYaml = String.format(
-                    "    conditions:\n" +
-                    "      - condition: numeric_state\n" +
-                    "        entity: %s\n" +
-                    conditionAttributePart +
-                    "        below: %s",
-                    name, this.displayValue);
-                break;
-            default:
-                // Fallback for unhandled or ALWAYS/NEVER if logic changes (should be caught above)
-                // If no specific operator condition, but we have an attribute, the elementYaml already includes it.
-                return elementYaml; // Or handle as error
-        }
-        return String.format(
-            "  - type: conditional\n" +
-            "%s\n" +
-            "    elements:\n" +
-            "%s",
-            conditionYaml, // Use the generated conditionYaml
-            elementYaml.replaceAll("(?m)^", "    ") // Indent the elementYaml
-        );
+        return String.format(Locale.US,
+            "  - type: icon\n" +
+            "    icon: mdi:checkbox-blank-circle\n" + // A solid circle icon
+            "    style:\n" +
+            "%s" +
+            "    tap_action:\n" + // Background handles actions
+            "      action: %s\n" +
+            "    double_tap_action:\n" +
+            "      action: %s\n" +
+            "    hold_action:\n" +
+            "      action: %s\n",
+            backgroundStyleProperties.toString(),
+            actionYaml(tapAction, tapActionValue, associatedFanEntityId),
+            actionYaml(doubleTapAction, doubleTapActionValue, associatedFanEntityId),
+            actionYaml(holdAction, holdActionValue, associatedFanEntityId));
     }
 
     private void saveInitialLightPowerValues() {
@@ -1067,19 +1200,21 @@ public class Entity implements Comparable<Entity> {
         blinking = settings.getBoolean(getSettingKey(SETTING_NAME_BLINKING), false);
         title = firstPiece.getDescription();
         opacity = settings.getInteger(getSettingKey(SETTING_NAME_OPACITY), 100);
-        backgroundColor = settings.get(getSettingKey(SETTING_NAME_BACKGROUND_COLOR), "rgba(255, 255, 255, 0.3)");
+        backgroundColor = settings.get(getSettingKey(SETTING_NAME_BACKGROUND_COLOR), "rgba(0, 0, 0, 0.5)");
         scaleFactor = settings.getDouble(getSettingKey(SETTING_NAME_SCALE_FACTOR), 1.0);
         alwaysOn = settings.getBoolean(getSettingKey(SETTING_NAME_ALWAYS_ON), false);
         associatedFanEntityId = settings.get(getSettingKey(SETTING_NAME_ASSOCIATED_FAN_ENTITY_ID), "");
         fanColor = getSavedEnumValue(FanColor.class, getSettingKey(SETTING_NAME_FAN_COLOR), FanColor.BLACK);
         showFanWhenOff = settings.getBoolean(getSettingKey(SETTING_NAME_SHOW_FAN_WHEN_OFF), true);
-        fanSize = getSavedEnumValue(FanSize.class, getSettingKey(SETTING_NAME_FAN_SIZE), FanSize.MEDIUM); // Load FanSize, default to Medium
-        showBorderAndBackground = settings.getBoolean(getSettingKey(SETTING_NAME_SHOW_BORDER_AND_BACKGROUND), true);
-        labelColor = settings.get(getSettingKey(SETTING_NAME_LABEL_COLOR), "black"); // Default to "black"
+        fanSize = getSavedEnumValue(FanSize.class, getSettingKey(SETTING_NAME_FAN_SIZE), FanSize.MEDIUM);
+        fanOpacity = settings.getInteger(getSettingKey(SETTING_NAME_FAN_OPACITY), 100);
+        showBorderAndBackground = settings.getBoolean(getSettingKey(SETTING_NAME_SHOW_BORDER_AND_BACKGROUND), false); // Default to false
+        labelColor = settings.get(getSettingKey(SETTING_NAME_LABEL_COLOR), "white"); // Default to "white" for better contrast with dark backgrounds
         labelTextShadow = settings.get(getSettingKey(SETTING_NAME_LABEL_TEXT_SHADOW), "");
         labelFontWeight = settings.get(getSettingKey(SETTING_NAME_LABEL_FONT_WEIGHT), "normal"); // Default to "normal"
         labelSuffix = settings.get(getSettingKey(SETTING_NAME_LABEL_SUFFIX), "");
 
+        excludeFromOverlap = settings.getBoolean(getSettingKey(SETTING_NAME_EXCLUDE_FROM_OVERLAP), false);
         isRgb = settings.getBoolean(getSettingKey(SETTING_NAME_IS_RGB), false);
         
         // Determine if this Entity represents a light based on its HA name or if any associated SH3D piece is a HomeLight

@@ -72,6 +72,8 @@ public class Controller {
     private static final String CONTROLLER_QUALITY = "quality";
     private static final String CONTROLLER_IMAGE_FORMAT = "imageFormat";
     private static final String CONTROLLER_RENDER_TIME = "renderTime";
+    private static final String CONTROLLER_POINT_OF_VIEW = "pointOfView";
+    private static final String CONTROLLER_FURNITURE_TO_CENTER = "furnitureToCenter";
     private static final String CONTROLLER_OUTPUT_DIRECTORY_NAME = "outputDirectoryName";
     private static final String CONTROLLER_USE_EXISTING_RENDERS = "useExistingRenders";
 
@@ -98,6 +100,8 @@ public class Controller {
     private String outputDirectoryName;
     private String outputRendersDirectoryName;
     private String outputFloorplanDirectoryName;
+    private String pointOfViewName;
+    private String furnitureNameToCenter;
     private boolean useExistingRenders;
     private Scenes scenes;
     private Map<String, Double> houseNdcBounds;
@@ -141,6 +145,8 @@ public Controller(Home home, ResourceBundle resourceBundle) {
         quality = Quality.valueOf(settings.get(CONTROLLER_QUALITY, Quality.HIGH.name()));
         imageFormat = ImageFormat.valueOf(settings.get(CONTROLLER_IMAGE_FORMAT, ImageFormat.PNG.name()));
         renderDateTimes = settings.getListLong(CONTROLLER_RENDER_TIME, Arrays.asList(camera.getTime()));
+        pointOfViewName = settings.get(CONTROLLER_POINT_OF_VIEW, resourceBundle.getString("HomeAssistantFloorPlan.Panel.pointOfView.currentView.text"));
+        furnitureNameToCenter = settings.get(CONTROLLER_FURNITURE_TO_CENTER, "");
         outputDirectoryName = settings.get(CONTROLLER_OUTPUT_DIRECTORY_NAME, System.getProperty("user.home"));
         outputRendersDirectoryName = outputDirectoryName + File.separator + "renders";
         outputFloorplanDirectoryName = outputDirectoryName + File.separator + "floorplan";
@@ -155,6 +161,10 @@ public Controller(Home home, ResourceBundle resourceBundle) {
         propertyChangeSupport.removePropertyChangeListener(property.name(), listener);
     }
     
+    public Home getHome() {
+        return this.home;
+    }
+
     public List<Entity> getLightEntities() {
         return lightEntities;
     }
@@ -286,9 +296,31 @@ public Controller(Home home, ResourceBundle resourceBundle) {
         buildScenes();
     }
     
-    // Method to get stored camera names, might be useful if re-enabled or for other purposes
-    // public List<String> getStoredCameraNamesFromHome() { ... }
-    
+    public List<String> getStoredCameraNames() {
+        return home.getStoredCameras().stream()
+                   .map(Camera::getName)
+                   .filter(name -> name != null && !name.isEmpty())
+                   .sorted()
+                   .collect(Collectors.toList());
+    }
+
+    public String getPointOfViewName() {
+        return pointOfViewName;
+    }
+
+    public void setPointOfViewName(String pointOfViewName) {
+        this.pointOfViewName = pointOfViewName;
+        settings.set(CONTROLLER_POINT_OF_VIEW, pointOfViewName);
+    }
+
+    public String getFurnitureNameToCenter() {
+        return furnitureNameToCenter;
+    }
+
+    public void setFurnitureNameToCenter(String furnitureNameToCenter) {
+        this.furnitureNameToCenter = furnitureNameToCenter;
+        settings.set(CONTROLLER_FURNITURE_TO_CENTER, furnitureNameToCenter);
+    }
     public BufferedImage generatePreviewImage() throws IOException, InterruptedException {
         // The plugin's 'this.camera' is already a clone of home.getCamera()
         // from when the modal dialog was opened.
@@ -325,7 +357,7 @@ public Controller(Home home, ResourceBundle resourceBundle) {
 
     public Map<String, Double> getRoomBoundingBoxPercent(Entity entity) {
         if (this.houseNdcBounds == null) {
-            System.err.println("Error: houseNdcBounds not calculated. Cannot get room bounding box.");
+            System.err.println("Warning: houseNdcBounds not calculated. Cannot get room bounding box for entity " + (entity != null ? entity.getName() : "null"));
             return null;
         }
         if (entity == null) { // getRoomForEntity will handle if piecesOfFurniture is empty
@@ -366,7 +398,7 @@ public Controller(Home home, ResourceBundle resourceBundle) {
         double minCornerX = Double.POSITIVE_INFINITY, maxCornerX = Double.NEGATIVE_INFINITY;
         double minCornerY = Double.POSITIVE_INFINITY, maxCornerY = Double.NEGATIVE_INFINITY;
 
-        float roomBaseElevation = room.getLevel() != null ? room.getLevel().getElevation() : 0;
+        float roomFloorElevation = room.getLevel() != null ? room.getLevel().getElevation() : 0;
         
         float actualRoomHeight;
         if (room.getLevel() != null) {
@@ -379,18 +411,22 @@ public Controller(Home home, ResourceBundle resourceBundle) {
         } else {
             actualRoomHeight = home.getWallHeight(); // Fallback if room has no level
         }
-                               
-        float roomCeilingElevation = roomBaseElevation + actualRoomHeight;
+
+        // To emphasize the ceiling, we can project the "floor" of the clickable area from a higher elevation.
+        // This makes the projected 2D box appear higher on the screen, more aligned with the ceiling.
+        // Using 0.5f means the clickable area will effectively represent the top 50% of the room's height.
+        float projectionBaseElevation = roomFloorElevation + (actualRoomHeight * 0.5f); 
+        float projectionCeilingElevation = roomFloorElevation + actualRoomHeight; // Ceiling remains the same
 
         List<Vector4d> cornerPointsToProject = new ArrayList<>();
         // Add floor points: p[0] is X, p[1] is Z (depth). Y is vertical.
-        for (float[] p2d : roomWorldPoints) {
-            cornerPointsToProject.add(new Vector4d(p2d[0], roomBaseElevation, p2d[1], 1.0));
+        for (float[] p2d : roomWorldPoints) { // Use the 2D points of the room
+            cornerPointsToProject.add(new Vector4d(p2d[0], projectionBaseElevation, p2d[1], 1.0));
         }
         // Add ceiling points
         if (room.isCeilingVisible() && actualRoomHeight > 0) { // Only add if room has height and visible ceiling
             for (float[] p2d : roomWorldPoints) {
-                cornerPointsToProject.add(new Vector4d(p2d[0], roomCeilingElevation, p2d[1], 1.0));
+                cornerPointsToProject.add(new Vector4d(p2d[0], projectionCeilingElevation, p2d[1], 1.0));
             }
         }
 
@@ -518,10 +554,7 @@ public Controller(Home home, ResourceBundle resourceBundle) {
     public void render() throws IOException, InterruptedException {
         propertyChangeSupport.firePropertyChange(Property.COMPLETED_RENDERS.name(), numberOfCompletedRenders, 0);
         numberOfCompletedRenders = 0;
-
-        // Ensure the plugin's working camera and projection are up-to-date with the selected setting
-        applySelectedCameraToWorkingCamera(); // Refreshes this.camera
-        build3dProjection(); // Rebuilds this.perspectiveTransform based on the refreshed this.camera
+        repositionEntities(); // Re-calculate positions based on current settings, including overlap exclusion
 
         try {
             Files.createDirectories(Paths.get(outputRendersDirectoryName));
@@ -1245,17 +1278,21 @@ public Controller(Home home, ResourceBundle resourceBundle) {
             }
         });
 
-        return allEntities.stream()
-            .map(entity -> entity.buildYaml(this)) // Pass controller instance
-            .filter(yamlString -> yamlString != null && !yamlString.isEmpty()) // Filter out empty YAML strings
-            .collect(Collectors.joining());
+        List<String> allYamlElements = new ArrayList<>();
+        for (Entity entity : allEntities) {
+            // entity.buildYaml(this) now returns a List<String>
+            allYamlElements.addAll(entity.buildYaml(this)); 
+        }
+
+        // Join all collected elements into a single string
+        return String.join("", allYamlElements);
     }
 
     private void repositionEntities() {
         build3dProjection();
         calculateHouseNdcBounds(); // Calculate overall house bounds in NDC
         calculateEntityPositions();
-        // moveEntityIconsToAvoidIntersection(); // Temporarily comment out to disable collision avoidance
+        moveEntityIconsToAvoidIntersection();
     }
 
     private void calculateEntityPositions() {
@@ -1271,14 +1308,37 @@ public Controller(Home home, ResourceBundle resourceBundle) {
     }
 
     private boolean doStateIconsIntersect(Entity first, Entity second) {
-        final double STATE_ICON_RAIDUS_INCLUDING_MARGIN = 25.0;
+        // The icon size is now responsive, defined as a percentage of the card dimensions.
+        // This collision detection logic must therefore calculate the icon's size in pixels
+        // based on the render dimensions to accurately check for overlap.
 
-        Point2d firstPositionInPixels = new Point2d(first.getPosition().x / 100.0 * renderWidth, first.getPosition().y / 100 * renderHeight);
-        Point2d secondPositionInPixels = new Point2d(second.getPosition().x / 100.0 * renderWidth, second.getPosition().y / 100 * renderHeight);
+        // Calculate the scaled size percentage for each icon
+        double firstScaledSizePercent = first.getDefaultIconBadgeBaseSizePercent() * first.getScaleFactor();
+        double secondScaledSizePercent = second.getDefaultIconBadgeBaseSizePercent() * second.getScaleFactor();
 
-        double x = Math.pow(firstPositionInPixels.x - secondPositionInPixels.x, 2) + Math.pow(firstPositionInPixels.y - secondPositionInPixels.y, 2);
+        // Calculate diameter in pixels for each icon. Since the render area may not be square,
+        // we calculate X and Y diameters and average them to approximate a circular shape for the check.
+        double firstDiameterXPx = (firstScaledSizePercent / 100.0) * renderWidth;
+        double firstDiameterYPx = (firstScaledSizePercent / 100.0) * renderHeight;
+        double firstAvgDiameter = (firstDiameterXPx + firstDiameterYPx) / 2.0;
 
-        return x <= Math.pow(STATE_ICON_RAIDUS_INCLUDING_MARGIN * 2, 2);
+        double secondDiameterXPx = (secondScaledSizePercent / 100.0) * renderWidth;
+        double secondDiameterYPx = (secondScaledSizePercent / 100.0) * renderHeight;
+        double secondAvgDiameter = (secondDiameterXPx + secondDiameterYPx) / 2.0;
+
+        // The minimum distance between centers is the sum of their radii.
+        double minCenterDist = (firstAvgDiameter / 2.0) + (secondAvgDiameter / 2.0);
+        
+        // Add a margin to prevent icons from touching. 20% of the minimum distance is a reasonable gap.
+        double margin = minCenterDist * 0.20;
+        double requiredDist = minCenterDist + margin;
+
+        Point2d firstPositionInPixels = new Point2d(first.getPosition().x / 100.0 * renderWidth, first.getPosition().y / 100.0 * renderHeight);
+        Point2d secondPositionInPixels = new Point2d(second.getPosition().x / 100.0 * renderWidth, second.getPosition().y / 100.0 * renderHeight);
+
+        double distSq = Math.pow(firstPositionInPixels.x - secondPositionInPixels.x, 2) + Math.pow(firstPositionInPixels.y - secondPositionInPixels.y, 2);
+
+        return distSq <= Math.pow(requiredDist, 2);
     }
 
     private boolean doesStateIconIntersectWithSet(Entity entity, Set<Entity> entities) {
@@ -1310,6 +1370,19 @@ public Controller(Home home, ResourceBundle resourceBundle) {
         List<Set<Entity>> intersectingStateIcons = new ArrayList<Set<Entity>>();
 
         Stream.concat(lightEntities.stream(), otherEntities.stream())
+            .filter(entity -> {
+                // Exclude entities whose icons are completely invisible AND non-interactive.
+                // These entities serve no visual or interactive purpose, so their position does not need to be adjusted for overlap.
+                return !(entity.getOpacity() == 0 &&
+                         entity.getTapAction() == Entity.Action.NONE &&
+                         entity.getDoubleTapAction() == Entity.Action.NONE &&
+                         entity.getHoldAction() == Entity.Action.NONE);
+            })
+            .filter(entity -> {
+                // Exclude entities explicitly marked to be excluded from overlap detection
+                boolean explicitlyExcluded = entity.isExcludedFromOverlap();
+                return !explicitlyExcluded;
+            })
             .forEach(entity -> {
                 Set<Entity> interectingSet = setWithWhichStateIconIntersects(entity, intersectingStateIcons);
                 if (interectingSet != null) {
@@ -1337,21 +1410,49 @@ public Controller(Home home, ResourceBundle resourceBundle) {
     }
 
     private void separateStateIcons(Set<Entity> entities) {
-        final double STEP_SIZE = 2.0;
+        // Calculate an average icon diameter for the group to determine a proportional step size.
+        // This makes the separation step scale with the size of the icons being moved.
+        double totalDiameter = 0;
+        int count = 0;
+        for (Entity entity : entities) {
+            double scaledSizePercent = entity.getDefaultIconBadgeBaseSizePercent() * entity.getScaleFactor();
+            double diameterXPx = (scaledSizePercent / 100.0) * renderWidth;
+            double diameterYPx = (scaledSizePercent / 100.0) * renderHeight;
+            totalDiameter += (diameterXPx + diameterYPx) / 2.0;
+            count++;
+        }
+        double avgIconDiameterPx = (count > 0) ? totalDiameter / count : 25.0; // Fallback if no entities
+
+        // Define the step size as a percentage of the average icon diameter.
+        // For example, 5% of the average icon diameter per step.
+        final double PROPORTIONAL_STEP_FACTOR = 0.05; // 5% of icon diameter
+        double pixelStepSize = avgIconDiameterPx * PROPORTIONAL_STEP_FACTOR;
 
         Point2d centerPostition = getCenterOfStateIcons(entities);
 
         for (Entity entity : entities) {
+            // This check should ideally not be needed here if filtering in findIntersectingStateIcons is correct,
+            // but added for robustness in debugging.
+            if (entity.isExcludedFromOverlap()) {
+                continue;
+            }
             Vector2d direction = new Vector2d(entity.getPosition().x - centerPostition.x, entity.getPosition().y - centerPostition.y);
 
             if (direction.length() == 0) {
-                double[] randomRepeatableDirection = { entity.getId().hashCode(), entity.getName().hashCode() };
-                direction.set(randomRepeatableDirection);
+                // If an entity is exactly at the center, give it a deterministic "random" push.
+                // Use entity's hash codes for repeatability across runs.
+                double angle = Math.atan2(entity.getName().hashCode(), entity.getId().hashCode());
+                direction.set(Math.cos(angle), Math.sin(angle));
             }
 
             direction.normalize();
-            direction.x = direction.x * (100.0 * (STEP_SIZE / renderWidth));
-            direction.y = direction.y * (100.0 * (STEP_SIZE / renderHeight));
+            // Convert pixelStepSize to percentage relative to render dimensions
+            double percentageStepX = (pixelStepSize / renderWidth) * 100.0;
+            double percentageStepY = (pixelStepSize / renderHeight) * 100.0;
+
+            direction.x *= percentageStepX;
+            direction.y *= percentageStepY;
+
             entity.move(direction);
         }
     }
@@ -1540,21 +1641,13 @@ public Controller(Home home, ResourceBundle resourceBundle) {
             Double.isInfinite(minNdcY) || Double.isInfinite(maxNdcY) ||
             minNdcX >= maxNdcX || minNdcY >= maxNdcY) { 
             this.houseNdcBounds = createDefaultNdcBounds();
-            System.err.println("DEBUG: Invalid house NDC bounds calculated. Defaulting to full view. MinX=" + minNdcX + ", MaxX=" + maxNdcX + ", MinY=" + minNdcY + ", MaxY=" + maxNdcY);
-            System.out.println("DEBUG: Using DEFAULT houseNdcBounds: minX=" + this.houseNdcBounds.get("minX") + 
-                               ", maxX=" + this.houseNdcBounds.get("maxX") + 
-                               ", minY=" + this.houseNdcBounds.get("minY") + 
-                               ", maxY=" + this.houseNdcBounds.get("maxY"));
+            System.err.println("Warning: Invalid house NDC bounds calculated. Defaulting to full view.");
         } else {
             this.houseNdcBounds = new HashMap<>();
             this.houseNdcBounds.put("minX", minNdcX);
             this.houseNdcBounds.put("maxX", maxNdcX);
             this.houseNdcBounds.put("minY", minNdcY);
             this.houseNdcBounds.put("maxY", maxNdcY);
-            System.out.println("DEBUG: Calculated houseNdcBounds: minX=" + minNdcX + 
-                               ", maxX=" + maxNdcX + 
-                               ", minY=" + minNdcY + 
-                               ", maxY=" + maxNdcY);
         }
     }
 

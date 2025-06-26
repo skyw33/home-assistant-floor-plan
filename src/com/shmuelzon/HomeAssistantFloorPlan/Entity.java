@@ -23,9 +23,9 @@ import com.eteks.sweethome3d.model.HomePieceOfFurniture;
 public class Entity implements Comparable<Entity> {
     public enum Property {ALWAYS_ON, IS_RGB, POSITION, SCALE_FACTOR, DISPLAY_CONDITION, FURNITURE_DISPLAY_CONDITION} // Added DISPLAY_CONDITION & FURNITURE_DISPLAY_CONDITION
     public enum DisplayType {BADGE, ICON, LABEL, ICON_AND_ANIMATED_FAN}
-    public enum ClickableAreaType { ENTITY_SIZE, ROOM_SIZE } // Added missing enum definition
+    public enum ClickableAreaType { ENTITY_SIZE, ROOM_SIZE }
     public enum FanSize {SMALL, MEDIUM, LARGE} // Added FanSize enum
-    public enum FanColor {WHITE, BLACK}
+    public enum FanColor {THREE_BLADE_CEILING_BLACK, THREE_BLADE_CEILING_WHITE, FOUR_BLADE_CEILING_BLACK, FOUR_BLADE_CEILING_WHITE, FOUR_BLADE_PORTABLE_BLACK, FOUR_BLADE_PORTABLE_WHITE}
     public enum Action {MORE_INFO, NAVIGATE, NONE, TOGGLE, TOGGLE_FAN}
 
     // --- NEW: Enum for the different operators ---
@@ -64,6 +64,7 @@ public class Entity implements Comparable<Entity> {
     private static final String SETTING_NAME_LABEL_TEXT_SHADOW = "labelTextShadow";
     private static final String SETTING_NAME_LABEL_FONT_WEIGHT = "labelFontWeight";
     private static final String SETTING_NAME_LABEL_SUFFIX = "labelSuffix";
+    private static final String SETTING_NAME_ICON_SHADOW = "iconShadow";
 
     // --- Fields ---
     private List<? extends HomePieceOfFurniture> piecesOfFurniture;
@@ -107,6 +108,7 @@ public class Entity implements Comparable<Entity> {
     private String labelFontWeight;
     private String labelSuffix;
     private boolean excludeFromOverlap;
+    private String iconShadow;
 
     public Entity(Settings settings, List<? extends HomePieceOfFurniture> piecesOfFurniture, ResourceBundle resourceBundle) {
         this.settings = settings;
@@ -215,7 +217,7 @@ public class Entity implements Comparable<Entity> {
 
     public void setFurnitureDisplayValue(String furnitureDisplayValue) {
         this.furnitureDisplayValue = furnitureDisplayValue;
-        settings.set(name + "." + SETTING_NAME_FURNITURE_DISPLAY_VALUE, furnitureDisplayValue);
+        settings.set(getSettingKey(SETTING_NAME_FURNITURE_DISPLAY_VALUE), furnitureDisplayValue);
         propertyChangeSupport.firePropertyChange(Property.FURNITURE_DISPLAY_CONDITION.name(), null, furnitureDisplayValue);
     }
     
@@ -338,7 +340,7 @@ public class Entity implements Comparable<Entity> {
     }
 
     public boolean isFanColorModified() {
-        return settings.get(name + "." + SETTING_NAME_FAN_COLOR) != null;
+        return settings.get(getSettingKey(SETTING_NAME_FAN_COLOR)) != null;
     }
 
     public boolean getShowBorderAndBackground() {
@@ -451,6 +453,21 @@ public class Entity implements Comparable<Entity> {
     public void setExcludeFromOverlap(boolean excludeFromOverlap) {
         this.excludeFromOverlap = excludeFromOverlap;
         settings.setBoolean(getSettingKey(SETTING_NAME_EXCLUDE_FROM_OVERLAP), excludeFromOverlap);
+    }
+
+    public String getIconShadow() {
+        return iconShadow;
+    }
+
+    public void setIconShadow(String iconShadow) {
+        this.iconShadow = iconShadow;
+        settings.set(getSettingKey(SETTING_NAME_ICON_SHADOW), iconShadow);
+    }
+
+    public boolean isIconShadowModified() {
+        // Check if the setting exists, which implies it has been modified from the default.
+        // The default is not stored, so a non-null value means it's been set.
+        return settings.get(getSettingKey(SETTING_NAME_ICON_SHADOW)) != null;
     }
 
 
@@ -605,6 +622,7 @@ public class Entity implements Comparable<Entity> {
         settings.set(getSettingKey(SETTING_NAME_LABEL_FONT_WEIGHT), null);
         settings.set(getSettingKey(SETTING_NAME_LABEL_SUFFIX), null);
         settings.set(getSettingKey(SETTING_NAME_EXCLUDE_FROM_OVERLAP), null);
+        settings.set(getSettingKey(SETTING_NAME_ICON_SHADOW), null);
         loadDefaultAttributes();
 
         propertyChangeSupport.firePropertyChange(Property.ALWAYS_ON.name(), oldAlwaysOn, alwaysOn);
@@ -692,8 +710,8 @@ public class Entity implements Comparable<Entity> {
 
             // --- Generate the Icon part of ICON_AND_ANIMATED_FAN ---
             StringBuilder iconStyleProperties = new StringBuilder();
-            iconStyleProperties.append(String.format(Locale.US, "      top: %.2f%%\n", position.y));
-            iconStyleProperties.append(String.format(Locale.US, "      left: %.2f%%\n", position.x));
+            iconStyleProperties.append(String.format(Locale.US, "      top: %.4f%%\n", position.y));
+            iconStyleProperties.append(String.format(Locale.US, "      left: %.4f%%\n", position.x));
             iconStyleProperties.append("      position: absolute\n"); // Ensure absolute positioning
             iconStyleProperties.append("      transform: translate(-50%, -50%)\n");
 
@@ -751,59 +769,99 @@ public class Entity implements Comparable<Entity> {
                     iconStyleProperties.toString());
             }
 
-            // --- Generate the Fan Image part of ICON_AND_ANIMATED_FAN ---
-            String fanImageOn;
-            String fanImageOffSuffix;
-            if (this.fanColor == FanColor.WHITE) {
-                fanImageOn = "/local/floorplan/animated_fan_grey.gif";
-                fanImageOffSuffix = "/local/floorplan/animated_fan_still_grey.gif";
-            } else { // BLACK or default
-                fanImageOn = "/local/floorplan/animated_fan.gif";
-                fanImageOffSuffix = "/local/floorplan/animated_fan_still.gif";
+            // --- Generate the Fan Image part of ICON_AND_ANIMATED_FAN using standard conditional elements ---
+            String fanImage;
+            switch (this.fanColor) {
+                case THREE_BLADE_CEILING_BLACK:
+                    fanImage = "/local/floorplan/3_blade_black.png";
+                    break;
+                case THREE_BLADE_CEILING_WHITE:
+                    fanImage = "/local/floorplan/3_blade_grey.png";
+                    break;
+                case FOUR_BLADE_CEILING_BLACK:
+                    fanImage = "/local/floorplan/fan_blades_black.png";
+                    break;
+                case FOUR_BLADE_CEILING_WHITE:
+                    fanImage = "/local/floorplan/fan_blades_grey.png";
+                    break;
+                case FOUR_BLADE_PORTABLE_BLACK:
+                    fanImage = "/local/floorplan/mdi_fan_black.png";
+                    break;
+                case FOUR_BLADE_PORTABLE_WHITE:
+                    fanImage = "/local/floorplan/mdi_fan_grey.png";
+                    break;
+                default: // Fallback
+                    fanImage = "/local/floorplan/fan_blades_black.png";
+                    break;
             }
-            String fanImageOff = this.showFanWhenOff ? fanImageOffSuffix : "/local/floorplan/transparent.png";
-
-            StringBuilder fanStyleProperties = new StringBuilder();
-            fanStyleProperties.append(String.format(Locale.US, "      top: %.2f%%\n", position.y));
-            fanStyleProperties.append(String.format(Locale.US, "      left: %.2f%%\n", position.x));
-            fanStyleProperties.append("      position: absolute\n"); // Ensure absolute positioning
-            // Calculate fan dimensions based on a 2:3 width:height aspect ratio
-            double fanWidthPercent; // This is the width of the fan image
-            double fanHeightPercent;
+ 
+            double fanSizePercent; // Use a single variable for square aspect ratio
             switch (this.fanSize) {
-                case SMALL: fanWidthPercent = 2.0; fanHeightPercent = 3.0; break;
-                case MEDIUM: fanWidthPercent = 4.0; fanHeightPercent = 5.0; break;
-                case LARGE: fanWidthPercent = 6.0; fanHeightPercent = 7.0; break;
-                default: fanWidthPercent = 4.0; fanHeightPercent = 5.0; break; // Default to Medium
+                case SMALL:  fanSizePercent = 3.0; break; // Use the larger dimension for square
+                case MEDIUM: fanSizePercent = 5.0; break; // Use the larger dimension for square
+                case LARGE:  fanSizePercent = 7.0; break; // Use the larger dimension for square
+                default:     fanSizePercent = 5.0; break; // Default to Medium (5.0%)
             }
             // Apply scaleFactor to the chosen size
-            fanWidthPercent *= scaleFactor; // Apply scale factor to fan image dimensions
-            fanHeightPercent *= scaleFactor; // Apply scale factor to fan image dimensions
-            fanStyleProperties.append(String.format(Locale.US, "      width: %.2f%%\n", fanWidthPercent)); // Use calculated width
-            fanStyleProperties.append(String.format(Locale.US, "      height: %.2f%%\n", fanHeightPercent));
-            fanStyleProperties.append("      transform: translate(-50%, -50%)\n");
-            fanStyleProperties.append("      pointer-events: none\n"); // Fan image is not clickable
-            fanStyleProperties.append(String.format(Locale.US, "      opacity: %d%%\n", this.fanOpacity));
+            fanSizePercent *= scaleFactor; // Apply scale factor to fan image dimensions
 
-            String fanImageElementYaml = "";
             if (this.associatedFanEntityId != null && !this.associatedFanEntityId.trim().isEmpty()) {
-                fanImageElementYaml = String.format(Locale.US,
-                    "  - type: image\n" +
-                    "    entity: %s\n" +
-                    "    title: null\n" +
-                    "    state_image:\n" +
-                    "      \"on\": \"%s\"\n" +
-                    "      \"off\": \"%s\"\n" +
-                    "    style:\n" +
+                // Base style properties used by both 'on' and 'off' states.
+                // The transform property is handled separately for each state.
+                // Moved transform: translate(-50%, -50%) to baseStyle for consistent centering of the element's bounding box.
+                // FAN_OFFSET_X/Y removed as per user request to rely solely on aspect ratio.
+                String baseStyle = String.format(Locale.US, // Increased precision to .4f, added translateZ(0) and removed trailing semicolons
+                    "          top: %.4f%%\n" +
+                    "          left: %.4f%%\n" +
+                    "          width: %.4f%%\n" + // Set width based on fanSizePercent
+                    "          aspect-ratio: 1 / 1\n" + // Force a square aspect ratio, browser will calculate height
+                    "          transform: translate(-50%%, -50%%) translateZ(0)\n" + // Ensure it's always centered and hardware accelerated
+                    "          pointer-events: none\n" +
+                    "          will-change: transform\n", // Hint to browser for smoother animation
+                    position.y, position.x, fanSizePercent); // Only width is needed, height derived from aspect-ratio
+
+                // --- Element for 'on' state (spinning) ---
+                String onStateStyle = baseStyle + String.format(Locale.US,
+                    "          animation: spin 1.5s linear infinite\n" +
+                    "          opacity: %.2f\n",
+                    (double)this.fanOpacity / 100.0);
+
+                String fanOnElementYaml = String.format(Locale.US,
+                    "  - type: conditional\n" +
+                    "    conditions:\n" +
+                    "      - entity: %s\n" +
+                    "        state: \"on\"\n" +
+                    "    elements:\n" +
+                    "      - type: image\n" +
+                    "        image: %s\n" +
+                    "        style:\n" +
                     "%s",
-                    this.associatedFanEntityId,
-                    fanImageOn,
-                    fanImageOff,
-                    fanStyleProperties.toString());
+                    this.associatedFanEntityId, fanImage, onStateStyle);
+                conditionalElements.add(fanOnElementYaml);
+
+                // --- Element for 'off' state (still) ---
+                if (this.showFanWhenOff) {
+                    String offStateStyle = baseStyle + String.format(Locale.US,
+                        "          animation: none\n" +
+                        "          opacity: %.2f\n",
+                        (double)this.fanOpacity / 100.0);
+
+                    String fanOffElementYaml = String.format(Locale.US,
+                        "  - type: conditional\n" +
+                        "    conditions:\n" +
+                        "      - entity: %s\n" +
+                        "        state: \"off\"\n" +
+                        "    elements:\n" +
+                        "      - type: image\n" +
+                        "        image: %s\n" +
+                        "        style:\n" +
+                        "%s",
+                        this.associatedFanEntityId, fanImage, offStateStyle);
+                    conditionalElements.add(fanOffElementYaml);
+                }
             }
             // The fan image should come before the icon in YAML for proper layering
             // (icon on top of fan).
-            conditionalElements.add(fanImageElementYaml);
             conditionalElements.add(iconElementYaml); // Icon is layered on top of fan
         } else { // Not ICON_AND_ANIMATED_FAN
             // --- Generate Background/Border Element if needed (for ICON or BADGE) ---
@@ -813,8 +871,8 @@ public class Entity implements Comparable<Entity> {
 
             // --- Generate the main visual element (Icon, Badge, or Label) ---
             StringBuilder styleProperties = new StringBuilder();
-            styleProperties.append(String.format(Locale.US, "      top: %.2f%%\n", position.y));
-            styleProperties.append(String.format(Locale.US, "      left: %.2f%%\n", position.x));
+            styleProperties.append(String.format(Locale.US, "      top: %.4f%%\n", position.y));
+            styleProperties.append(String.format(Locale.US, "      left: %.4f%%\n", position.x));
             styleProperties.append("      position: absolute\n"); // Ensure absolute positioning
             styleProperties.append("      transform: translate(-50%, -50%)\n");
             
@@ -870,6 +928,12 @@ public class Entity implements Comparable<Entity> {
                 double scaledFontVw = 0.8 * scaleFactor;
                 double scaledFontPx = 5.0 * scaleFactor;
                 styleProperties.append(String.format(Locale.US, "      font-size: calc(%.2fvw + %.2fpx)\n", scaledFontVw, scaledFontPx));
+            }
+
+            // Add icon shadow filter if applicable
+            if ((displayType == DisplayType.ICON || displayType == DisplayType.BADGE) && iconShadow != null && !iconShadow.equals("none")) {
+                String shadowRgba = iconShadow.equals("white") ? "255,255,255,1" : "0,0,0,1";
+                styleProperties.append(String.format(Locale.US, "      filter: drop-shadow(2px 2px 2px rgba(%s))\n", shadowRgba));
             }
             
             // Prepare conditional parts as arguments for String.format
@@ -985,10 +1049,10 @@ public class Entity implements Comparable<Entity> {
                     String transparentImagePath = "/local/floorplan/" + fullImageName + ".png?version=" + transparentImageHash;
 
                     clickableAreaYaml = String.format(Locale.US,
-                        "  - type: image\n" +
+                        "  - type: image\n" + // Increased precision to .4f
                         "    entity: %s\n" +
                         "    image: %s\n" +
-                        "    tap_action:\n" +
+                        "    tap_action:\n" + // Increased precision to .4f
                         "      action: %s\n" +
                         "    double_tap_action:\n" +
                         "      action: %s\n" +
@@ -996,9 +1060,9 @@ public class Entity implements Comparable<Entity> {
                         "      action: %s\n" +
                         "    style:\n" +
                         "      top: %.2f%%\n" +
-                        "      left: %.2f%%\n" +
-                        "      width: %.2f%%\n" +  // Use original percentage from roomBounds
-                        "      height: %.2f%%\n" + // Use original percentage from roomBounds
+                        "      left: %.4f%%\n" +
+                        "      width: %.4f%%\n" +  // Use original percentage from roomBounds
+                        "      height: %.4f%%\n" + // Use original percentage from roomBounds
                         "      transform: translate(0%%, 0%%)\n" +
                         "      opacity: 0%%\n",
                         this.name,
@@ -1097,10 +1161,10 @@ public class Entity implements Comparable<Entity> {
      */
     private String generateBackgroundElementYaml(Point2d position, double scaleFactor, String backgroundColor,
                                                  Action tapAction, String tapActionValue, Action doubleTapAction, String doubleTapActionValue,
-                                                 Action holdAction, String holdActionValue, String associatedFanEntityId, String entityName, String entityId, boolean blinking, int opacity) {
+                                                 Action holdAction, String holdActionValue, String associatedFanEntityId, String entityName, String entityId, boolean blinking, int opacity) { // Increased precision to .4f
         StringBuilder backgroundStyleProperties = new StringBuilder();
-        backgroundStyleProperties.append(String.format(Locale.US, "      top: %.2f%%\n", position.y));
-        backgroundStyleProperties.append(String.format(Locale.US, "      left: %.2f%%\n", position.x));
+        backgroundStyleProperties.append(String.format(Locale.US, "      top: %.4f%%\n", position.y));
+        backgroundStyleProperties.append(String.format(Locale.US, "      left: %.4f%%\n", position.x));
         backgroundStyleProperties.append("      position: absolute\n");
         backgroundStyleProperties.append("      transform: translate(-50%, -50%)\n");
 
@@ -1204,7 +1268,7 @@ public class Entity implements Comparable<Entity> {
         scaleFactor = settings.getDouble(getSettingKey(SETTING_NAME_SCALE_FACTOR), 1.0);
         alwaysOn = settings.getBoolean(getSettingKey(SETTING_NAME_ALWAYS_ON), false);
         associatedFanEntityId = settings.get(getSettingKey(SETTING_NAME_ASSOCIATED_FAN_ENTITY_ID), "");
-        fanColor = getSavedEnumValue(FanColor.class, getSettingKey(SETTING_NAME_FAN_COLOR), FanColor.BLACK);
+        fanColor = getSavedEnumValue(FanColor.class, getSettingKey(SETTING_NAME_FAN_COLOR), FanColor.FOUR_BLADE_CEILING_BLACK); // Default to 4 Blade Ceiling Black
         showFanWhenOff = settings.getBoolean(getSettingKey(SETTING_NAME_SHOW_FAN_WHEN_OFF), true);
         fanSize = getSavedEnumValue(FanSize.class, getSettingKey(SETTING_NAME_FAN_SIZE), FanSize.MEDIUM);
         fanOpacity = settings.getInteger(getSettingKey(SETTING_NAME_FAN_OPACITY), 100);
@@ -1214,6 +1278,7 @@ public class Entity implements Comparable<Entity> {
         labelFontWeight = settings.get(getSettingKey(SETTING_NAME_LABEL_FONT_WEIGHT), "normal"); // Default to "normal"
         labelSuffix = settings.get(getSettingKey(SETTING_NAME_LABEL_SUFFIX), "");
 
+        iconShadow = settings.get(getSettingKey(SETTING_NAME_ICON_SHADOW), "none"); // Default to "none"
         excludeFromOverlap = settings.getBoolean(getSettingKey(SETTING_NAME_EXCLUDE_FROM_OVERLAP), false);
         isRgb = settings.getBoolean(getSettingKey(SETTING_NAME_IS_RGB), false);
         

@@ -8,6 +8,8 @@ import com.eteks.sweethome3d.model.Home;
 
 public class Settings {
     private static final String PROPERTY_PREFIX = "com.shmuelzon.HomeAssistantFloorPlan.";
+    public static final String CONTROLLER_HA_URL = "haUrl";
+    public static final String CONTROLLER_HA_TOKEN = "haToken";
 
     private Home home;
 

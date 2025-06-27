@@ -13,6 +13,9 @@ import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.io.InputStream;
 import java.lang.InterruptedException;
+import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.nio.channels.ClosedByInterruptException;
 import java.lang.reflect.InvocationTargetException;
 import java.nio.file.Files;
@@ -34,10 +37,12 @@ import java.util.Map;
 import java.util.MissingResourceException;
 import java.util.Optional;
 import java.util.ResourceBundle;
+import java.util.TimeZone;
 import java.util.Set;
 import java.util.stream.Collectors;
 import java.nio.file.StandardCopyOption;
 import java.awt.RenderingHints;
+import javax.swing.JOptionPane;
 import java.util.ResourceBundle;
 import javax.swing.SwingUtilities;
 import java.util.stream.Stream;
@@ -56,7 +61,11 @@ import com.eteks.sweethome3d.model.HomeFurnitureGroup;
 import com.eteks.sweethome3d.model.HomeLight;
 import com.eteks.sweethome3d.model.HomePieceOfFurniture;
 import com.eteks.sweethome3d.model.Room;
+import com.eteks.sweethome3d.model.Light;
+import com.eteks.sweethome3d.model.FurnitureCategory;
+import com.eteks.sweethome3d.model.UserPreferences;
 import com.shmuelzon.HomeAssistantFloorPlan.Entity.DisplayOperator;
+import com.eteks.sweethome3d.model.PieceOfFurniture;
 
 
 public class Controller {
@@ -80,9 +89,12 @@ public class Controller {
     private static final String CONTROLLER_FURNITURE_TO_CENTER = "furnitureToCenter";
     private static final String CONTROLLER_OUTPUT_DIRECTORY_NAME = "outputDirectoryName";
     private static final String CONTROLLER_USE_EXISTING_RENDERS = "useExistingRenders";
+    private static final String CONTROLLER_DAY_TIMESTAMP = "dayTimestamp";
+    private static final String CONTROLLER_NIGHT_TIMESTAMP = "nightTimestamp";
 
     private Home home;
     private Settings settings;
+    private UserPreferences preferences;
     private Camera camera;
     private List<Entity> lightEntities = new ArrayList<>();
     private List<Entity> otherEntities = new ArrayList<>();
@@ -108,11 +120,14 @@ public class Controller {
     private String furnitureNameToCenter;
     private boolean useExistingRenders;
     private Scenes scenes;
+    private long dayTimestamp;
+    private long nightTimestamp;
     private Map<String, Double> houseNdcBounds;
     private ResourceBundle resourceBundle;
 
-public Controller(Home home, ResourceBundle resourceBundle) {
+public Controller(Home home, UserPreferences preferences, ResourceBundle resourceBundle) {
         this.home = home;
+        this.preferences = preferences;
         settings = new Settings(home);
         camera = home.getCamera().clone();
 
@@ -155,6 +170,8 @@ public Controller(Home home, ResourceBundle resourceBundle) {
         outputRendersDirectoryName = outputDirectoryName + File.separator + "renders";
         outputFloorplanDirectoryName = outputDirectoryName + File.separator + "floorplan";
         useExistingRenders = settings.getBoolean(CONTROLLER_USE_EXISTING_RENDERS, true);
+        dayTimestamp = settings.getLong(CONTROLLER_DAY_TIMESTAMP, -1L);
+        nightTimestamp = settings.getLong(CONTROLLER_NIGHT_TIMESTAMP, -1L);
     }
 
     public void addPropertyChangeListener(Property property, PropertyChangeListener listener) {
@@ -167,6 +184,24 @@ public Controller(Home home, ResourceBundle resourceBundle) {
     
     public Home getHome() {
         return this.home;
+    }
+
+    public long getDayTimestamp() {
+        return dayTimestamp;
+    }
+
+    public void setDayTimestamp(long timestamp) {
+        this.dayTimestamp = timestamp;
+        settings.setLong(CONTROLLER_DAY_TIMESTAMP, timestamp);
+    }
+
+    public long getNightTimestamp() {
+        return nightTimestamp;
+    }
+
+    public void setNightTimestamp(long timestamp) {
+        this.nightTimestamp = timestamp;
+        settings.setLong(CONTROLLER_NIGHT_TIMESTAMP, timestamp);
     }
 
     public List<Entity> getLightEntities() {
@@ -334,7 +369,19 @@ public Controller(Home home, ResourceBundle resourceBundle) {
 
         AbstractPhotoRenderer previewPhotoRenderer = null;
         BufferedImage image = new BufferedImage(this.renderWidth, this.renderHeight, BufferedImage.TYPE_INT_RGB);
+        
+        int originalSkyColor = this.home.getEnvironment().getSkyColor();
+        final int DARK_THRESHOLD = 16;
+        boolean skyWasModified = false;
+        
         try {
+            // Temporarily change sky color if it's black to avoid pitch-black previews
+            Color sky = new Color(originalSkyColor);
+            if (sky.getRed() < DARK_THRESHOLD && sky.getGreen() < DARK_THRESHOLD && sky.getBlue() < DARK_THRESHOLD) {
+                this.home.getEnvironment().setSkyColor(new Color(170, 210, 255).getRGB());
+                skyWasModified = true;
+            }
+            
             Map<Renderer, String> rendererToClassName = new HashMap<Renderer, String>() {{
                 put(Renderer.SUNFLOW, "com.eteks.sweethome3d.j3d.PhotoRenderer");
                 put(Renderer.YAFARAY, "com.eteks.sweethome3d.j3d.YafarayRenderer");
@@ -591,10 +638,89 @@ public Controller(Home home, ResourceBundle resourceBundle) {
 
             return image;
         } finally { // This 'finally' block is now correctly associated with the 'try' block above
+            if (skyWasModified) {
+                this.home.getEnvironment().setSkyColor(originalSkyColor);
+            }
             if (previewPhotoRenderer != null) {
                 previewPhotoRenderer.dispose();
             }
         }
+    }
+
+    /**
+     * Generates a base image preview at a specific time, with all lights off and no entities drawn.
+     * This is useful for quickly checking the sun's position and shadows.
+     * @param time The epoch milliseconds for the time to render.
+     * @return A BufferedImage of the rendered scene.
+     * @throws IOException If an I/O error occurs during rendering.
+     * @throws InterruptedException If the rendering thread is interrupted.
+     */
+    public BufferedImage generateBaseImagePreview(long time) throws IOException, InterruptedException {
+        // 1. Save current state
+        long originalTime = this.camera.getTime();
+        int originalSkyColor = this.home.getEnvironment().getSkyColor();
+        final int DARK_THRESHOLD = 16;
+        boolean skyWasModified = false;
+
+        // 2. Set new state for preview
+        this.camera.setTime(getUtcCorrectedTimestamp(time));
+        
+        // Ensure all lights are off for a base image preview
+        // This includes both lightEntities (on current level) and otherLevelsEntities
+        // 3. Turn all lights off, including those on other levels
+        for (Entity light : lightEntities) {
+            light.setLightPower(false);
+        }
+        turnOffLightsFromOtherLevels();
+
+        // 4. Render the scene (renderScene uses this.camera and current light state)
+        BufferedImage image;
+        try {
+            // Check if sky is black and temporarily change it for a better preview
+            Color sky = new Color(originalSkyColor);
+            if (sky.getRed() < DARK_THRESHOLD && sky.getGreen() < DARK_THRESHOLD && sky.getBlue() < DARK_THRESHOLD) {
+                this.home.getEnvironment().setSkyColor(new Color(170, 210, 255).getRGB());
+                skyWasModified = true;
+            }
+            image = renderScene();
+        } finally {
+            // 5. Restore original state
+            if (skyWasModified) {
+                this.home.getEnvironment().setSkyColor(originalSkyColor);
+            }
+            restoreEntityConfiguration(); // This restores light power to initial values.
+            this.camera.setTime(originalTime);
+        }
+        return image;
+    }
+
+    /**
+     * Corrects a universal timestamp to a "fake" UTC timestamp that the renderer
+     * will interpret as the correct local time. This is a workaround for SH3D versions
+     * that ignore the project's timezone when rendering.
+     * @param universalTimestamp The correct, universal epoch millisecond timestamp.
+     * @return A corrected timestamp for the renderer.
+     */
+    private long getUtcCorrectedTimestamp(long universalTimestamp) {
+        // The timezone of the project, where the user expects to see local times.
+        TimeZone projectTimeZone = TimeZone.getTimeZone(this.home.getCompass().getTimeZone());
+        ZoneId projectZoneId = projectTimeZone.toZoneId();
+
+        // 1. Convert the universal timestamp to a ZonedDateTime in the project's timezone.
+        // This gives us the correct local date and time components (e.g., 4:48 PM in Austin).
+        Instant universalInstant = Instant.ofEpochMilli(universalTimestamp);
+        java.time.ZonedDateTime localTime = universalInstant.atZone(projectZoneId);
+
+        // 2. Extract the local date and time, but discard the timezone information.
+        // We now have just the "wall clock" time (e.g., 2023-01-08T16:48).
+        LocalDateTime localDateTime = localTime.toLocalDateTime();
+
+        // 3. Create a new ZonedDateTime by interpreting the local "wall clock" time as if it were in UTC.
+        // This is the core of the fix, tricking the renderer.
+        java.time.ZonedDateTime timeForRenderer = localDateTime.atZone(ZoneId.of("UTC"));
+
+        // 4. Convert this new, "fake" UTC time back to a universal timestamp to pass to the renderer.
+        return timeForRenderer.toInstant().toEpochMilli();
     }
 
     /**
@@ -902,9 +1028,11 @@ public Controller(Home home, ResourceBundle resourceBundle) {
                 Files.createDirectories(Paths.get(outputRendersDirectoryName + File.separator + scene.getName()));
                 Files.createDirectories(Paths.get(outputFloorplanDirectoryName + File.separator + scene.getName()));
                 final Scene currentSceneForEdt = scene;
+                final long correctedTime = getUtcCorrectedTimestamp(scene.getRenderingTime());
                 try {
                     SwingUtilities.invokeAndWait(() -> {
-                        currentSceneForEdt.prepare();
+                        camera.setTime(correctedTime);
+                        currentSceneForEdt.prepareForVisibility();
                     });
                 } catch (InvocationTargetException e) {
                     throw new RuntimeException("Error preparing scene on EDT", e.getCause() != null ? e.getCause() : e);
@@ -1840,7 +1968,149 @@ public Controller(Home home, ResourceBundle resourceBundle) {
         return Stream.concat(lightEntities.stream(), otherEntities.stream()).collect(Collectors.toList());
     }
 
+    /**
+     * Returns a list of HomePieceOfFurniture objects that are not currently associated with any
+     * Home Assistant entity (i.e., their name does not start with an allowed HA domain).
+     * This is used for the "Associate Existing Furniture" feature.
+     * @return A list of unassociated HomePieceOfFurniture objects.
+     */
+    public List<HomePieceOfFurniture> getUnassociatedSh3dFurniture() {
+        Set<String> associatedHaEntityIds = getAllConfiguredEntities().stream()
+                                            .map(Entity::getName) // Entity.getName() is the HA entity_id
+                                            .collect(Collectors.toSet());
+
+        List<HomePieceOfFurniture> unassociated = new ArrayList<>();
+        for (HomePieceOfFurniture piece : home.getFurniture()) {
+            // A piece is considered unassociated if its name is not an HA entity ID
+            // and it's not already in our internal list of configured entities.
+            if (!isHomeAssistantEntity(piece.getName()) && !associatedHaEntityIds.contains(piece.getName())) {
+                unassociated.add(piece);
+            }
+        }
+        return unassociated;
+    }
+
+    public void importHaEntities(List<HaEntity> entitiesToImport) {
+        // Find the desired "Incandescent bulb" model from the catalog
+        PieceOfFurniture lightModel = null;
+        PieceOfFurniture defaultLightModel = null;
+        PieceOfFurniture defaultFurnitureModel = null;
+
+        if (this.preferences != null) {
+            // The correct way to iterate the catalog is through its categories.
+            for (FurnitureCategory category : this.preferences.getFurnitureCatalog().getCategories()) {
+                for (PieceOfFurniture piece : category.getFurniture()) {
+                    // Find the specific "Incandescent bulb"
+                    if ("Incandescent bulb".equalsIgnoreCase(piece.getName())) {
+                        lightModel = piece;
+                    }
+                    // Find the first available piece that is a Light to use as a fallback
+                    if (defaultLightModel == null && piece instanceof Light) {
+                        defaultLightModel = piece;
+                    }
+                    // Find the first available piece of any kind as a generic fallback
+                    if (defaultFurnitureModel == null) {
+                        defaultFurnitureModel = piece;
+                    }
+                    // Optimization: if we've found all we need, stop searching
+                    if (lightModel != null && defaultLightModel != null && defaultFurnitureModel != null) break;
+                }
+                if (lightModel != null && defaultLightModel != null && defaultFurnitureModel != null) break;
+            }
+        }
+
+        if (defaultFurnitureModel == null) {
+            JOptionPane.showMessageDialog(null, "Furniture catalog is empty. Cannot import entities.", "Error", JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+        if (lightModel == null) { // If specific model not found, log it.
+            System.err.println("Warning: 'Incandescent bulb' model not found in catalog. Using a default light model as a fallback.");
+        }
+
+        Map<String, Room> roomsByName = new HashMap<>();
+        for (Room room : home.getRooms()) {
+            if (room.getName() != null && !room.getName().isEmpty()) {
+                roomsByName.put(room.getName(), room);
+            }
+        }
+
+        List<HomePieceOfFurniture> addedFurniture = new ArrayList<>();
+        for (HaEntity entity : entitiesToImport) {
+            String areaName = entity.getAreaName();
+            if ("No Area Assigned".equalsIgnoreCase(areaName)) areaName = null;
+
+            Room targetRoom = (areaName != null) ? roomsByName.get(areaName) : null;
+
+            float centerX = 0, centerY = 0;
+            com.eteks.sweethome3d.model.Level level = home.getSelectedLevel();
+
+            if (targetRoom != null) {
+                float[][] points = targetRoom.getPoints();
+                if (points != null && points.length > 0) {
+                    float minX = Float.MAX_VALUE, maxX = Float.MIN_VALUE, minY = Float.MAX_VALUE, maxY = Float.MIN_VALUE;
+                    for (float[] p : points) {
+                        minX = Math.min(minX, p[0]); maxX = Math.max(maxX, p[0]);
+                        minY = Math.min(minY, p[1]); maxY = Math.max(maxY, p[1]);
+                    }
+                    centerX = (minX + maxX) / 2; centerY = (minY + maxY) / 2;
+                }
+                level = targetRoom.getLevel();
+            } else {
+                System.out.println("Warning: No room found for entity '" + entity.getEntityId() + "'. Placing at default location (0,0).");
+            }
+
+            HomePieceOfFurniture newPiece;
+            if ("light".equals(entity.getDomain())) {
+                PieceOfFurniture modelToUse = (lightModel != null) ? lightModel : defaultLightModel;
+                if (modelToUse instanceof Light) {
+                    newPiece = new HomeLight((Light) modelToUse);
+                } else {
+                    // This happens if no light model was found at all, so we use a generic furniture piece.
+                    System.err.println("Warning: No suitable light model found in catalog. Using a default furniture piece for light entity: " + entity.getEntityId());
+                    newPiece = new HomePieceOfFurniture(defaultFurnitureModel);
+                }
+            } else {
+                newPiece = new HomePieceOfFurniture(defaultFurnitureModel);
+            }
+            newPiece.setName(entity.getEntityId());
+            newPiece.setDescription(entity.getFriendlyName());
+            newPiece.setX(centerX); newPiece.setY(centerY);
+            if (level != null) newPiece.setLevel(level);
+            newPiece.setElevation(home.getWallHeight() * 0.8f);
+            addedFurniture.add(newPiece);
+        }
+
+        if (!addedFurniture.isEmpty()) {
+            for (HomePieceOfFurniture piece : addedFurniture) {
+                home.addPieceOfFurniture(piece);
+            }
+        }
+
+        this.lightEntities.clear(); this.otherEntities.clear(); this.otherLevelsEntities.clear();
+        createHomeAssistantEntities(); buildLightsGroups(); buildScenes(); repositionEntities();
+
+        JOptionPane.showMessageDialog(null, entitiesToImport.size() + " entities have been imported.\nYou can now close the plugin and position them on your floorplan.", "Import Complete", JOptionPane.INFORMATION_MESSAGE);
+    }
     private void applySelectedCameraToWorkingCamera() {
+        // This method is called when the home's camera changes, or when the plugin starts.
+        // Its purpose is to update the plugin's internal 'this.camera' to reflect the current
+        // state of the home's camera, ensuring that subsequent rendering and entity positioning
+        // calculations are based on the correct camera perspective.
+        
+        // The home.getCamera() method returns the current camera of the home.
+        // We clone it to ensure that 'this.camera' is an independent object
+        // that we can manipulate (e.g., set its time for rendering scenes)
+        // without affecting the home's actual camera directly until we explicitly
+        // apply changes back to the home.
+        
+        // The logic here is to ensure 'this.camera' always holds a valid, up-to-date
+        // representation of the camera from which the floorplan will be rendered.
+        // If a specific point of view is selected in the plugin's settings, that
+        // will override this base camera later in the plugin's execution flow
+        // (e.g., in Plugin.java's execute method or during scene preparation).
+        
+        // This method primarily serves as a synchronization point for the camera state.
+
         Camera baseCameraToUse = null;
         // Always use the current home camera as the base.
         baseCameraToUse = home.getCamera();
@@ -1851,6 +2121,26 @@ public Controller(Home home, ResourceBundle resourceBundle) {
         // we replace this.camera with a clone of baseCameraToUse.
         // this.camera is guaranteed to be non-null here due to initialization in the constructor.
         this.camera = baseCameraToUse.clone();
+    }
+
+    /**
+     * Associates an existing Sweet Home 3D furniture piece with a Home Assistant entity.
+     * This updates the SH3D piece's name and description, and then refreshes the plugin's
+     * internal entity lists to reflect the new association.
+     * @param sh3dPiece The Sweet Home 3D furniture piece to associate.
+     * @param haEntity The Home Assistant entity to associate with.
+     */
+    public void associateFurnitureWithHaEntity(HomePieceOfFurniture sh3dPiece, HaEntity haEntity) {
+        sh3dPiece.setName(haEntity.getEntityId());
+        sh3dPiece.setDescription(haEntity.getFriendlyName());
+        home.setModified(true); // Mark home as modified to save changes
+
+        // Rebuild all internal entity lists to reflect the new association
+        this.lightEntities.clear(); this.otherEntities.clear(); this.otherLevelsEntities.clear();
+        createHomeAssistantEntities(); // Re-scan the home for entities
+        buildLightsGroups(); // Rebuild groups
+        buildScenes(); // Rebuild scenes
+        repositionEntities(); // Re-calculate positions
     }
 
     public Room getRoomForEntity(Entity entity) {
@@ -1880,6 +2170,25 @@ public Controller(Home home, ResourceBundle resourceBundle) {
         }
         return null; // Entity not found in any room
     }
+
+    /**
+     * Given a HomePieceOfFurniture, finds the Room it is located in.
+     * This is a helper for the "Associate Existing Furniture" feature.
+     * @param piece The HomePieceOfFurniture to check.
+     * @return The Room containing the piece, or null if not found in any room.
+     */
+    public Room getRoomForSh3dPiece(HomePieceOfFurniture piece) {
+        if (piece == null || piece.getLevel() == null) {
+            return null;
+        }
+        for (Room room : home.getRooms()) {
+            if (room.getLevel() == piece.getLevel() && room.containsPoint(piece.getX(), piece.getY(), piece.getLevel().getElevation() + 0.01f)) {
+                return room;
+            }
+        }
+        return null;
+    }
+
 
     private Point3f getEntity3DCentroid(Entity entity) {
         if (entity.getPiecesOfFurniture().isEmpty()) {

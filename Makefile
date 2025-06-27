@@ -17,7 +17,8 @@ SWEET_HOME_VERSION=7.5
 SWEET_HOME_JAR=dl/SweetHome3D-$(SWEET_HOME_VERSION).jar
 J3D_CORE_JAR=dl/j3dcore.jar
 J3D_VECMATH_JAR=dl/vecmath.jar
-JAVA_DEPENDENCIES=$(SWEET_HOME_JAR) $(J3D_CORE_JAR) $(J3D_VECMATH_JAR)
+JSON_SIMPLE_JAR=dl/json-simple-1.1.1.jar
+JAVA_DEPENDENCIES=$(SWEET_HOME_JAR) $(J3D_CORE_JAR) $(J3D_VECMATH_JAR) $(JSON_SIMPLE_JAR)
 PLUGIN=HomeAssistantFloorPlanPlugin-$(VERSION).sh3p
 
 DOCKER_CMD :=
@@ -54,6 +55,9 @@ $(J3D_CORE_JAR):
 $(J3D_VECMATH_JAR):
 	$(call download,$@,https://jogamp.org/deployment/java3d/1.6.0-final/vecmath.jar)
 
+$(JSON_SIMPLE_JAR):
+	$(call download,$@,https://repo1.maven.org/maven2/com/googlecode/json-simple/json-simple/1.1.1/json-simple-1.1.1.jar)
+
 build/%.class: src/%.java $(JAVA_DEPENDENCIES)
 	$(call exec,JAVA,$@,$(DOCKER_CMD) javac -classpath "dl/*:src" -target 1.8 -source 1.8 -Xlint:-options -d build $<)
 
@@ -68,7 +72,8 @@ build/$(PKG_PATH_RELATIVE)/resources/%.png: $(SRC_DIR)/resources/%.png
 	$(Q)mkdir -p $(dir $@)
 	$(call exec,CP,$@,cp $< $@)
 
-$(PLUGIN): $(OBJS)
+$(PLUGIN): $(OBJS) $(JSON_SIMPLE_JAR)
+	$(call exec,UNZIP,$(JSON_SIMPLE_JAR) into build/,$(DOCKER_CMD) unzip -oq $(JSON_SIMPLE_JAR) -d build)
 	$(call exec,JAR,$@,$(DOCKER_CMD) jar -cf $@ -C build .)
 
 build: $(PLUGIN)

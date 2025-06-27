@@ -38,6 +38,7 @@ import java.util.Set;
 import java.util.stream.Collectors;
 import java.nio.file.StandardCopyOption;
 import java.awt.RenderingHints;
+import javax.swing.JOptionPane;
 import java.util.ResourceBundle;
 import javax.swing.SwingUtilities;
 import java.util.stream.Stream;
@@ -56,7 +57,11 @@ import com.eteks.sweethome3d.model.HomeFurnitureGroup;
 import com.eteks.sweethome3d.model.HomeLight;
 import com.eteks.sweethome3d.model.HomePieceOfFurniture;
 import com.eteks.sweethome3d.model.Room;
+import com.eteks.sweethome3d.model.Light;
+import com.eteks.sweethome3d.model.FurnitureCategory;
+import com.eteks.sweethome3d.model.UserPreferences;
 import com.shmuelzon.HomeAssistantFloorPlan.Entity.DisplayOperator;
+import com.eteks.sweethome3d.model.PieceOfFurniture;
 
 
 public class Controller {
@@ -83,6 +88,7 @@ public class Controller {
 
     private Home home;
     private Settings settings;
+    private UserPreferences preferences;
     private Camera camera;
     private List<Entity> lightEntities = new ArrayList<>();
     private List<Entity> otherEntities = new ArrayList<>();
@@ -111,8 +117,9 @@ public class Controller {
     private Map<String, Double> houseNdcBounds;
     private ResourceBundle resourceBundle;
 
-public Controller(Home home, ResourceBundle resourceBundle) {
+public Controller(Home home, UserPreferences preferences, ResourceBundle resourceBundle) {
         this.home = home;
+        this.preferences = preferences;
         settings = new Settings(home);
         camera = home.getCamera().clone();
 
@@ -1840,7 +1847,149 @@ public Controller(Home home, ResourceBundle resourceBundle) {
         return Stream.concat(lightEntities.stream(), otherEntities.stream()).collect(Collectors.toList());
     }
 
+    /**
+     * Returns a list of HomePieceOfFurniture objects that are not currently associated with any
+     * Home Assistant entity (i.e., their name does not start with an allowed HA domain).
+     * This is used for the "Associate Existing Furniture" feature.
+     * @return A list of unassociated HomePieceOfFurniture objects.
+     */
+    public List<HomePieceOfFurniture> getUnassociatedSh3dFurniture() {
+        Set<String> associatedHaEntityIds = getAllConfiguredEntities().stream()
+                                            .map(Entity::getName) // Entity.getName() is the HA entity_id
+                                            .collect(Collectors.toSet());
+
+        List<HomePieceOfFurniture> unassociated = new ArrayList<>();
+        for (HomePieceOfFurniture piece : home.getFurniture()) {
+            // A piece is considered unassociated if its name is not an HA entity ID
+            // and it's not already in our internal list of configured entities.
+            if (!isHomeAssistantEntity(piece.getName()) && !associatedHaEntityIds.contains(piece.getName())) {
+                unassociated.add(piece);
+            }
+        }
+        return unassociated;
+    }
+
+    public void importHaEntities(List<HaEntity> entitiesToImport) {
+        // Find the desired "Incandescent bulb" model from the catalog
+        PieceOfFurniture lightModel = null;
+        PieceOfFurniture defaultLightModel = null;
+        PieceOfFurniture defaultFurnitureModel = null;
+
+        if (this.preferences != null) {
+            // The correct way to iterate the catalog is through its categories.
+            for (FurnitureCategory category : this.preferences.getFurnitureCatalog().getCategories()) {
+                for (PieceOfFurniture piece : category.getFurniture()) {
+                    // Find the specific "Incandescent bulb"
+                    if ("Incandescent bulb".equalsIgnoreCase(piece.getName())) {
+                        lightModel = piece;
+                    }
+                    // Find the first available piece that is a Light to use as a fallback
+                    if (defaultLightModel == null && piece instanceof Light) {
+                        defaultLightModel = piece;
+                    }
+                    // Find the first available piece of any kind as a generic fallback
+                    if (defaultFurnitureModel == null) {
+                        defaultFurnitureModel = piece;
+                    }
+                    // Optimization: if we've found all we need, stop searching
+                    if (lightModel != null && defaultLightModel != null && defaultFurnitureModel != null) break;
+                }
+                if (lightModel != null && defaultLightModel != null && defaultFurnitureModel != null) break;
+            }
+        }
+
+        if (defaultFurnitureModel == null) {
+            JOptionPane.showMessageDialog(null, "Furniture catalog is empty. Cannot import entities.", "Error", JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+        if (lightModel == null) { // If specific model not found, log it.
+            System.err.println("Warning: 'Incandescent bulb' model not found in catalog. Using a default light model as a fallback.");
+        }
+
+        Map<String, Room> roomsByName = new HashMap<>();
+        for (Room room : home.getRooms()) {
+            if (room.getName() != null && !room.getName().isEmpty()) {
+                roomsByName.put(room.getName(), room);
+            }
+        }
+
+        List<HomePieceOfFurniture> addedFurniture = new ArrayList<>();
+        for (HaEntity entity : entitiesToImport) {
+            String areaName = entity.getAreaName();
+            if ("No Area Assigned".equalsIgnoreCase(areaName)) areaName = null;
+
+            Room targetRoom = (areaName != null) ? roomsByName.get(areaName) : null;
+
+            float centerX = 0, centerY = 0;
+            com.eteks.sweethome3d.model.Level level = home.getSelectedLevel();
+
+            if (targetRoom != null) {
+                float[][] points = targetRoom.getPoints();
+                if (points != null && points.length > 0) {
+                    float minX = Float.MAX_VALUE, maxX = Float.MIN_VALUE, minY = Float.MAX_VALUE, maxY = Float.MIN_VALUE;
+                    for (float[] p : points) {
+                        minX = Math.min(minX, p[0]); maxX = Math.max(maxX, p[0]);
+                        minY = Math.min(minY, p[1]); maxY = Math.max(maxY, p[1]);
+                    }
+                    centerX = (minX + maxX) / 2; centerY = (minY + maxY) / 2;
+                }
+                level = targetRoom.getLevel();
+            } else {
+                System.out.println("Warning: No room found for entity '" + entity.getEntityId() + "'. Placing at default location (0,0).");
+            }
+
+            HomePieceOfFurniture newPiece;
+            if ("light".equals(entity.getDomain())) {
+                PieceOfFurniture modelToUse = (lightModel != null) ? lightModel : defaultLightModel;
+                if (modelToUse instanceof Light) {
+                    newPiece = new HomeLight((Light) modelToUse);
+                } else {
+                    // This happens if no light model was found at all, so we use a generic furniture piece.
+                    System.err.println("Warning: No suitable light model found in catalog. Using a default furniture piece for light entity: " + entity.getEntityId());
+                    newPiece = new HomePieceOfFurniture(defaultFurnitureModel);
+                }
+            } else {
+                newPiece = new HomePieceOfFurniture(defaultFurnitureModel);
+            }
+            newPiece.setName(entity.getEntityId());
+            newPiece.setDescription(entity.getFriendlyName());
+            newPiece.setX(centerX); newPiece.setY(centerY);
+            if (level != null) newPiece.setLevel(level);
+            newPiece.setElevation(home.getWallHeight() * 0.8f);
+            addedFurniture.add(newPiece);
+        }
+
+        if (!addedFurniture.isEmpty()) {
+            for (HomePieceOfFurniture piece : addedFurniture) {
+                home.addPieceOfFurniture(piece);
+            }
+        }
+
+        this.lightEntities.clear(); this.otherEntities.clear(); this.otherLevelsEntities.clear();
+        createHomeAssistantEntities(); buildLightsGroups(); buildScenes(); repositionEntities();
+
+        JOptionPane.showMessageDialog(null, entitiesToImport.size() + " entities have been imported.\nYou can now close the plugin and position them on your floorplan.", "Import Complete", JOptionPane.INFORMATION_MESSAGE);
+    }
     private void applySelectedCameraToWorkingCamera() {
+        // This method is called when the home's camera changes, or when the plugin starts.
+        // Its purpose is to update the plugin's internal 'this.camera' to reflect the current
+        // state of the home's camera, ensuring that subsequent rendering and entity positioning
+        // calculations are based on the correct camera perspective.
+        
+        // The home.getCamera() method returns the current camera of the home.
+        // We clone it to ensure that 'this.camera' is an independent object
+        // that we can manipulate (e.g., set its time for rendering scenes)
+        // without affecting the home's actual camera directly until we explicitly
+        // apply changes back to the home.
+        
+        // The logic here is to ensure 'this.camera' always holds a valid, up-to-date
+        // representation of the camera from which the floorplan will be rendered.
+        // If a specific point of view is selected in the plugin's settings, that
+        // will override this base camera later in the plugin's execution flow
+        // (e.g., in Plugin.java's execute method or during scene preparation).
+        
+        // This method primarily serves as a synchronization point for the camera state.
+
         Camera baseCameraToUse = null;
         // Always use the current home camera as the base.
         baseCameraToUse = home.getCamera();
@@ -1851,6 +2000,26 @@ public Controller(Home home, ResourceBundle resourceBundle) {
         // we replace this.camera with a clone of baseCameraToUse.
         // this.camera is guaranteed to be non-null here due to initialization in the constructor.
         this.camera = baseCameraToUse.clone();
+    }
+
+    /**
+     * Associates an existing Sweet Home 3D furniture piece with a Home Assistant entity.
+     * This updates the SH3D piece's name and description, and then refreshes the plugin's
+     * internal entity lists to reflect the new association.
+     * @param sh3dPiece The Sweet Home 3D furniture piece to associate.
+     * @param haEntity The Home Assistant entity to associate with.
+     */
+    public void associateFurnitureWithHaEntity(HomePieceOfFurniture sh3dPiece, HaEntity haEntity) {
+        sh3dPiece.setName(haEntity.getEntityId());
+        sh3dPiece.setDescription(haEntity.getFriendlyName());
+        home.setModified(true); // Mark home as modified to save changes
+
+        // Rebuild all internal entity lists to reflect the new association
+        this.lightEntities.clear(); this.otherEntities.clear(); this.otherLevelsEntities.clear();
+        createHomeAssistantEntities(); // Re-scan the home for entities
+        buildLightsGroups(); // Rebuild groups
+        buildScenes(); // Rebuild scenes
+        repositionEntities(); // Re-calculate positions
     }
 
     public Room getRoomForEntity(Entity entity) {
@@ -1880,6 +2049,25 @@ public Controller(Home home, ResourceBundle resourceBundle) {
         }
         return null; // Entity not found in any room
     }
+
+    /**
+     * Given a HomePieceOfFurniture, finds the Room it is located in.
+     * This is a helper for the "Associate Existing Furniture" feature.
+     * @param piece The HomePieceOfFurniture to check.
+     * @return The Room containing the piece, or null if not found in any room.
+     */
+    public Room getRoomForSh3dPiece(HomePieceOfFurniture piece) {
+        if (piece == null || piece.getLevel() == null) {
+            return null;
+        }
+        for (Room room : home.getRooms()) {
+            if (room.getLevel() == piece.getLevel() && room.containsPoint(piece.getX(), piece.getY(), piece.getLevel().getElevation() + 0.01f)) {
+                return room;
+            }
+        }
+        return null;
+    }
+
 
     private Point3f getEntity3DCentroid(Entity entity) {
         if (entity.getPiecesOfFurniture().isEmpty()) {

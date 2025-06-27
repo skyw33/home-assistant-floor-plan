@@ -265,14 +265,15 @@ When using the "Room overlay" light mixing mode, it's also suggested to:
 - [x] Allow selecting quality (high/low)
 - [x] Allow selecting date/time of render
 - [x] Create multiple renders for multiple hours of the day and display in Home
-      Assistant according to local time
+  Assistant according to local time
 - [x] Allow stopping rendering thread
 - [X] Allow enabling/disabling/configuring state-icon
 - [x] Support including sensors state-icons/labels for other items
-- [ ] Support fans with animated gif/png with css3 image rotation
+- [x] Support fans with animated gif/png with css3 image rotation
 - [x] Make sure state-icons/labels do not overlap
 - [x] Allow using existing rendered images and just re-create overlays and YAML
 - [ ] After rendering is complete, show preview of overlay images
 - [x] Allow overriding state-icons/labels positions, and save persistently
 - [X] Allow defining, per entity, if it should be an icon or label, and save
-      that persistently
+  that persistently
+- [ ] Discover and import entities directly from Home Assistant to simplify setup

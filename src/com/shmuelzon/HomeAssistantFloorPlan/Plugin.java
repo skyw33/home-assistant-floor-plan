@@ -121,12 +121,12 @@ public class Plugin extends com.eteks.sweethome3d.plugin.Plugin {
 
                 @Override
                 protected void done() {
-                    // This part runs back on the EDT after doInBackground completes
+                    // This part runs back on the EDT after doInBackground() completes
                     waitDialog.dispose();
 
                     try {
-                        get(); // Check for any exceptions that occurred in doInBackground()
-                        controller = new Controller(getHome(), resourceBundle);
+                        get(); // Check for any exceptions that occurred in doInBackground
+                        controller = new Controller(getHome(), getUserPreferences(), resourceBundle);
                         panel = new Panel(getUserPreferences(), getPluginClassLoader(), controller, HomeAssistantFloorPlanAction.this);
                         panel.displayView(view);
                     } catch (Exception e) {

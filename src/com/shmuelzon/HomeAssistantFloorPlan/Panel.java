@@ -94,7 +94,7 @@ import com.eteks.sweethome3d.viewcontroller.View;
 
 @SuppressWarnings("serial")
 public class Panel extends JPanel implements DialogView {
-    private enum ActionType {ADD_RENDER_TIME, REMOVE_RENDER_TIME, BROWSE, START, STOP, CLOSE, PREVIEW}
+    private enum ActionType {ADD_RENDER_TIME, REMOVE_RENDER_TIME, BROWSE, START, STOP, CLOSE, PREVIEW, IMPORT_FROM_HA}
     private Plugin.HomeAssistantFloorPlanAction pluginAction;
     
     final TimeZone timeZone = TimeZone.getDefault(); // Interpret user input in local time zone
@@ -146,6 +146,7 @@ public class Panel extends JPanel implements DialogView {
     private JButton startButton;
     private JButton closeButton;
     private JButton previewButton;
+    private JButton importEntitiesButton;
     private boolean isProgrammaticTimeChange = false;
 
     private class EntityNode {
@@ -512,6 +513,14 @@ public class Panel extends JPanel implements DialogView {
                         }
                     }
                 }.execute();
+            }
+        });
+        actions.put(ActionType.IMPORT_FROM_HA, new ResourceAction(preferences, Panel.class, ActionType.IMPORT_FROM_HA.name(), true) {
+            @Override
+            public void actionPerformed(ActionEvent ev) {
+                // Launch the new importer dialog
+                HomeAssistantImporterDialog importerDialog = new HomeAssistantImporterDialog(SwingUtilities.getWindowAncestor(Panel.this), preferences, controller);
+                importerDialog.setVisible(true);
             }
         });
     }
@@ -1023,6 +1032,14 @@ public class Panel extends JPanel implements DialogView {
 
         previewButton = new JButton(actionMap.get(ActionType.PREVIEW));
         previewButton.setText(resource.getString("HomeAssistantFloorPlan.Panel.previewButton.text"));
+
+        importEntitiesButton = new JButton(actionMap.get(ActionType.IMPORT_FROM_HA));
+        try {
+            importEntitiesButton.setText(resource.getString("HomeAssistantFloorPlan.Panel.importEntitiesButton.text"));
+        } catch (java.util.MissingResourceException e) {
+            // Provide a fallback text if the resource key is not found.
+            importEntitiesButton.setText("Import from HA...");
+        }
     }
 
     private void setComponentsEnabled(boolean enabled) {
@@ -1044,6 +1061,7 @@ public class Panel extends JPanel implements DialogView {
         outputDirectoryBrowseButton.setEnabled(enabled);
         useExistingRendersCheckbox.setEnabled(enabled);
         previewButton.setEnabled(enabled);
+        importEntitiesButton.setEnabled(enabled);
         if (enabled) {
             startButton.setAction(getActionMap().get(ActionType.START));
             startButton.setText(resource.getString("HomeAssistantFloorPlan.Panel.startButton.text"));
@@ -1223,9 +1241,13 @@ public class Panel extends JPanel implements DialogView {
             GridBagConstraints.HORIZONTAL, insets, 0, 0));
         currentGridYIndex++;
 
-        add(previewButton, new GridBagConstraints( // Add preview button
-            0, currentGridYIndex, 1, 1, 0, 0, GridBagConstraints.LINE_START, // Align left under progress bar
-            GridBagConstraints.NONE, insets, 0, 0));
+        // Panel for bottom buttons
+        JPanel bottomButtonPanel = new JPanel(new GridBagLayout());
+        bottomButtonPanel.add(importEntitiesButton, new GridBagConstraints(0, 0, 1, 1, 0.0, 0, GridBagConstraints.LINE_START, GridBagConstraints.NONE, new Insets(0,0,0,standardGap), 0, 0));
+        bottomButtonPanel.add(previewButton, new GridBagConstraints(1, 0, 1, 1, 1.0, 0, GridBagConstraints.LINE_START, GridBagConstraints.NONE, new Insets(0,0,0,0), 0, 0));
+        add(bottomButtonPanel, new GridBagConstraints(
+            0, currentGridYIndex, 4, 1, 1.0, 0, GridBagConstraints.LINE_START,
+            GridBagConstraints.HORIZONTAL, insets, 0, 0));
     }
 
     public void displayView(View parentView) {

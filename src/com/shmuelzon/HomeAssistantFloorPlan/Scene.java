@@ -35,8 +35,15 @@ public class Scene {
         return name;
     }
 
-    public void prepare() {
-        camera.setTime(renderingTime);
+    public long getRenderingTime() {
+        return this.renderingTime;
+    }
+
+    /**
+     * Sets the visibility of entities based on this scene's configuration.
+     * This is separated from time-setting to allow the Controller to manage time.
+     */
+    public void prepareForVisibility() {
         for (Entity entity : entitiesToShowHide)
             entity.setVisible(entitiesToShow.contains(entity));
     }

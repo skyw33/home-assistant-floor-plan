@@ -13,6 +13,9 @@ import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.io.InputStream;
 import java.lang.InterruptedException;
+import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.nio.channels.ClosedByInterruptException;
 import java.lang.reflect.InvocationTargetException;
 import java.nio.file.Files;
@@ -34,6 +37,7 @@ import java.util.Map;
 import java.util.MissingResourceException;
 import java.util.Optional;
 import java.util.ResourceBundle;
+import java.util.TimeZone;
 import java.util.Set;
 import java.util.stream.Collectors;
 import java.nio.file.StandardCopyOption;
@@ -85,6 +89,8 @@ public class Controller {
     private static final String CONTROLLER_FURNITURE_TO_CENTER = "furnitureToCenter";
     private static final String CONTROLLER_OUTPUT_DIRECTORY_NAME = "outputDirectoryName";
     private static final String CONTROLLER_USE_EXISTING_RENDERS = "useExistingRenders";
+    private static final String CONTROLLER_DAY_TIMESTAMP = "dayTimestamp";
+    private static final String CONTROLLER_NIGHT_TIMESTAMP = "nightTimestamp";
 
     private Home home;
     private Settings settings;
@@ -114,6 +120,8 @@ public class Controller {
     private String furnitureNameToCenter;
     private boolean useExistingRenders;
     private Scenes scenes;
+    private long dayTimestamp;
+    private long nightTimestamp;
     private Map<String, Double> houseNdcBounds;
     private ResourceBundle resourceBundle;
 
@@ -162,6 +170,8 @@ public Controller(Home home, UserPreferences preferences, ResourceBundle resourc
         outputRendersDirectoryName = outputDirectoryName + File.separator + "renders";
         outputFloorplanDirectoryName = outputDirectoryName + File.separator + "floorplan";
         useExistingRenders = settings.getBoolean(CONTROLLER_USE_EXISTING_RENDERS, true);
+        dayTimestamp = settings.getLong(CONTROLLER_DAY_TIMESTAMP, -1L);
+        nightTimestamp = settings.getLong(CONTROLLER_NIGHT_TIMESTAMP, -1L);
     }
 
     public void addPropertyChangeListener(Property property, PropertyChangeListener listener) {
@@ -174,6 +184,24 @@ public Controller(Home home, UserPreferences preferences, ResourceBundle resourc
     
     public Home getHome() {
         return this.home;
+    }
+
+    public long getDayTimestamp() {
+        return dayTimestamp;
+    }
+
+    public void setDayTimestamp(long timestamp) {
+        this.dayTimestamp = timestamp;
+        settings.setLong(CONTROLLER_DAY_TIMESTAMP, timestamp);
+    }
+
+    public long getNightTimestamp() {
+        return nightTimestamp;
+    }
+
+    public void setNightTimestamp(long timestamp) {
+        this.nightTimestamp = timestamp;
+        settings.setLong(CONTROLLER_NIGHT_TIMESTAMP, timestamp);
     }
 
     public List<Entity> getLightEntities() {
@@ -341,7 +369,19 @@ public Controller(Home home, UserPreferences preferences, ResourceBundle resourc
 
         AbstractPhotoRenderer previewPhotoRenderer = null;
         BufferedImage image = new BufferedImage(this.renderWidth, this.renderHeight, BufferedImage.TYPE_INT_RGB);
+        
+        int originalSkyColor = this.home.getEnvironment().getSkyColor();
+        final int DARK_THRESHOLD = 16;
+        boolean skyWasModified = false;
+        
         try {
+            // Temporarily change sky color if it's black to avoid pitch-black previews
+            Color sky = new Color(originalSkyColor);
+            if (sky.getRed() < DARK_THRESHOLD && sky.getGreen() < DARK_THRESHOLD && sky.getBlue() < DARK_THRESHOLD) {
+                this.home.getEnvironment().setSkyColor(new Color(170, 210, 255).getRGB());
+                skyWasModified = true;
+            }
+            
             Map<Renderer, String> rendererToClassName = new HashMap<Renderer, String>() {{
                 put(Renderer.SUNFLOW, "com.eteks.sweethome3d.j3d.PhotoRenderer");
                 put(Renderer.YAFARAY, "com.eteks.sweethome3d.j3d.YafarayRenderer");
@@ -598,10 +638,89 @@ public Controller(Home home, UserPreferences preferences, ResourceBundle resourc
 
             return image;
         } finally { // This 'finally' block is now correctly associated with the 'try' block above
+            if (skyWasModified) {
+                this.home.getEnvironment().setSkyColor(originalSkyColor);
+            }
             if (previewPhotoRenderer != null) {
                 previewPhotoRenderer.dispose();
             }
         }
+    }
+
+    /**
+     * Generates a base image preview at a specific time, with all lights off and no entities drawn.
+     * This is useful for quickly checking the sun's position and shadows.
+     * @param time The epoch milliseconds for the time to render.
+     * @return A BufferedImage of the rendered scene.
+     * @throws IOException If an I/O error occurs during rendering.
+     * @throws InterruptedException If the rendering thread is interrupted.
+     */
+    public BufferedImage generateBaseImagePreview(long time) throws IOException, InterruptedException {
+        // 1. Save current state
+        long originalTime = this.camera.getTime();
+        int originalSkyColor = this.home.getEnvironment().getSkyColor();
+        final int DARK_THRESHOLD = 16;
+        boolean skyWasModified = false;
+
+        // 2. Set new state for preview
+        this.camera.setTime(getUtcCorrectedTimestamp(time));
+        
+        // Ensure all lights are off for a base image preview
+        // This includes both lightEntities (on current level) and otherLevelsEntities
+        // 3. Turn all lights off, including those on other levels
+        for (Entity light : lightEntities) {
+            light.setLightPower(false);
+        }
+        turnOffLightsFromOtherLevels();
+
+        // 4. Render the scene (renderScene uses this.camera and current light state)
+        BufferedImage image;
+        try {
+            // Check if sky is black and temporarily change it for a better preview
+            Color sky = new Color(originalSkyColor);
+            if (sky.getRed() < DARK_THRESHOLD && sky.getGreen() < DARK_THRESHOLD && sky.getBlue() < DARK_THRESHOLD) {
+                this.home.getEnvironment().setSkyColor(new Color(170, 210, 255).getRGB());
+                skyWasModified = true;
+            }
+            image = renderScene();
+        } finally {
+            // 5. Restore original state
+            if (skyWasModified) {
+                this.home.getEnvironment().setSkyColor(originalSkyColor);
+            }
+            restoreEntityConfiguration(); // This restores light power to initial values.
+            this.camera.setTime(originalTime);
+        }
+        return image;
+    }
+
+    /**
+     * Corrects a universal timestamp to a "fake" UTC timestamp that the renderer
+     * will interpret as the correct local time. This is a workaround for SH3D versions
+     * that ignore the project's timezone when rendering.
+     * @param universalTimestamp The correct, universal epoch millisecond timestamp.
+     * @return A corrected timestamp for the renderer.
+     */
+    private long getUtcCorrectedTimestamp(long universalTimestamp) {
+        // The timezone of the project, where the user expects to see local times.
+        TimeZone projectTimeZone = TimeZone.getTimeZone(this.home.getCompass().getTimeZone());
+        ZoneId projectZoneId = projectTimeZone.toZoneId();
+
+        // 1. Convert the universal timestamp to a ZonedDateTime in the project's timezone.
+        // This gives us the correct local date and time components (e.g., 4:48 PM in Austin).
+        Instant universalInstant = Instant.ofEpochMilli(universalTimestamp);
+        java.time.ZonedDateTime localTime = universalInstant.atZone(projectZoneId);
+
+        // 2. Extract the local date and time, but discard the timezone information.
+        // We now have just the "wall clock" time (e.g., 2023-01-08T16:48).
+        LocalDateTime localDateTime = localTime.toLocalDateTime();
+
+        // 3. Create a new ZonedDateTime by interpreting the local "wall clock" time as if it were in UTC.
+        // This is the core of the fix, tricking the renderer.
+        java.time.ZonedDateTime timeForRenderer = localDateTime.atZone(ZoneId.of("UTC"));
+
+        // 4. Convert this new, "fake" UTC time back to a universal timestamp to pass to the renderer.
+        return timeForRenderer.toInstant().toEpochMilli();
     }
 
     /**
@@ -909,9 +1028,11 @@ public Controller(Home home, UserPreferences preferences, ResourceBundle resourc
                 Files.createDirectories(Paths.get(outputRendersDirectoryName + File.separator + scene.getName()));
                 Files.createDirectories(Paths.get(outputFloorplanDirectoryName + File.separator + scene.getName()));
                 final Scene currentSceneForEdt = scene;
+                final long correctedTime = getUtcCorrectedTimestamp(scene.getRenderingTime());
                 try {
                     SwingUtilities.invokeAndWait(() -> {
-                        currentSceneForEdt.prepare();
+                        camera.setTime(correctedTime);
+                        currentSceneForEdt.prepareForVisibility();
                     });
                 } catch (InvocationTargetException e) {
                     throw new RuntimeException("Error preparing scene on EDT", e.getCause() != null ? e.getCause() : e);

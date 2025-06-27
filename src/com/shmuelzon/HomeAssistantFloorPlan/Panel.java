@@ -14,7 +14,6 @@ import java.awt.Window;
 import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
 import java.awt.event.ItemEvent;
-import java.awt.Cursor;
 import java.awt.event.ItemListener;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
@@ -24,8 +23,11 @@ import java.beans.PropertyChangeEvent;
 import java.beans.PropertyChangeListener;
 import java.time.Instant;
 import java.awt.image.BufferedImage;
+import java.util.concurrent.ExecutionException;
 import java.time.LocalDate;
 import java.time.LocalTime;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.stream.Collectors;
 import java.util.Date;
@@ -36,8 +38,6 @@ import java.util.ResourceBundle;
 import java.util.TimeZone;
 import java.util.TreeSet;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.Executors;
 
 import javax.swing.ActionMap;
 import javax.swing.DefaultListCellRenderer;
@@ -77,6 +77,7 @@ import javax.swing.tree.DefaultTreeCellRenderer;
 import javax.swing.tree.TreePath;
 
 import com.eteks.sweethome3d.model.Content;
+import com.eteks.sweethome3d.model.Compass;
 import com.eteks.sweethome3d.model.HomePieceOfFurniture;
 import com.eteks.sweethome3d.model.PieceOfFurniture; // Use this interface
 import com.eteks.sweethome3d.model.CatalogPieceOfFurniture; // For accessing category
@@ -94,10 +95,9 @@ import com.eteks.sweethome3d.viewcontroller.View;
 
 @SuppressWarnings("serial")
 public class Panel extends JPanel implements DialogView {
-    private enum ActionType {ADD_RENDER_TIME, REMOVE_RENDER_TIME, BROWSE, START, STOP, CLOSE, PREVIEW, IMPORT_FROM_HA}
+    private enum ActionType {ADD_RENDER_TIME, REMOVE_RENDER_TIME, ADD_DAY_NIGHT, BROWSE, START, STOP, CLOSE, PREVIEW, PREVIEW_DAY, PREVIEW_NIGHT, IMPORT_FROM_HA}
     private Plugin.HomeAssistantFloorPlanAction pluginAction;
-    
-    final TimeZone timeZone = TimeZone.getDefault(); // Interpret user input in local time zone
+    private final TimeZone timeZone;
     private static Panel currentPanel;
     private UserPreferences preferences;
     private Controller controller;
@@ -134,6 +134,7 @@ public class Panel extends JPanel implements DialogView {
     private JSpinner renderTimeSpinner;
     private JButton renderTimeAddButton;
     private JButton renderTimeRemoveButton;
+    private JButton addDayNightButton;
     private DefaultListModel<Long> renderTimesListModel;
     private JLabel addedTimesLabel;
     private JList<Long> renderTimesList;
@@ -146,8 +147,12 @@ public class Panel extends JPanel implements DialogView {
     private JButton startButton;
     private JButton closeButton;
     private JButton previewButton;
+    private JButton previewDayButton;
+    private JButton previewNightButton;
     private JButton importEntitiesButton;
     private boolean isProgrammaticTimeChange = false;
+    private long lastCalculatedDayTimestamp = -1; // Stores the last calculated day time
+    private long lastCalculatedNightTimestamp = -1; // Stores the last calculated night time
 
     private class EntityNode {
         public Entity entity;
@@ -353,10 +358,13 @@ public class Panel extends JPanel implements DialogView {
         this.preferences = preferences;
         this.controller = controller;
         this.pluginAction = pluginAction;
+        this.timeZone = TimeZone.getTimeZone(controller.getHome().getCompass().getTimeZone());
+        this.lastCalculatedDayTimestamp = controller.getDayTimestamp();
+        this.lastCalculatedNightTimestamp = controller.getNightTimestamp();
 
         resource = ResourceBundle.getBundle("com.shmuelzon.HomeAssistantFloorPlan.ApplicationPlugin", Locale.getDefault(), classLoader);
-        createActions();
-        createComponents();
+        createActions(); // Actions must be created and put into the ActionMap first
+        createComponents(); // Then components can be created using those actions
 
         // Set tooltip initial delay to 0 for immediate display
         ToolTipManager.sharedInstance().setInitialDelay(0);
@@ -376,19 +384,37 @@ public class Panel extends JPanel implements DialogView {
                 renderingTimes.add(newTimestamp);
                 controller.setRenderDateTimes(new ArrayList<>(new TreeSet<Long>(renderingTimes)));
                 updateRenderingTimesList(false);
+                updateStartButtonState();
+            }
+        });
+        actions.put(ActionType.ADD_DAY_NIGHT, new ResourceAction(preferences, Panel.class, ActionType.ADD_DAY_NIGHT.name(), true) {
+            @Override
+            public void actionPerformed(ActionEvent ev) {
+                addDayNightTimes();
             }
         });
         actions.put(ActionType.REMOVE_RENDER_TIME, new ResourceAction(preferences, Panel.class, ActionType.REMOVE_RENDER_TIME.name(), true) {
             @Override
             public void actionPerformed(ActionEvent ev) {
                 int selectedIndex = renderTimesList.getSelectedIndex();
-                if (selectedIndex == -1 || renderTimesListModel.getSize() <= 1)
+                if (selectedIndex == -1)
                     return;
 
                 List<Long> renderingTimes = controller.getRenderDateTimes();
+                Long removedTimestamp = renderingTimes.get(selectedIndex);
+                // If the removed time was the designated Day or Night time, invalidate the designation.
+                if (removedTimestamp.equals(lastCalculatedDayTimestamp)) {
+                    lastCalculatedDayTimestamp = -1;
+                    controller.setDayTimestamp(-1L);
+                }
+                if (removedTimestamp.equals(lastCalculatedNightTimestamp)) {
+                    lastCalculatedNightTimestamp = -1;
+                    controller.setNightTimestamp(-1L);
+                }
                 renderingTimes.remove(selectedIndex);
                 controller.setRenderDateTimes(renderingTimes);
                 updateRenderingTimesList(false);
+                updateStartButtonState();
             }
         });
         actions.put(ActionType.BROWSE, new ResourceAction(preferences, Panel.class, ActionType.BROWSE.name(), true) {
@@ -400,7 +426,7 @@ public class Panel extends JPanel implements DialogView {
         actions.put(ActionType.START, new ResourceAction(preferences, Panel.class, ActionType.START.name(), true) {
             @Override
             public void actionPerformed(ActionEvent ev) {
-                renderExecutor = Executors.newSingleThreadExecutor();
+                renderExecutor = java.util.concurrent.Executors.newSingleThreadExecutor();
                 renderExecutor.execute(new Runnable() {
                     public void run() {
                         // Disable UI components. It's generally safe to call this from the worker thread
@@ -477,23 +503,7 @@ public class Panel extends JPanel implements DialogView {
                         try {
                             final BufferedImage previewImage = get(); // Get result from doInBackground
                             if (previewImage != null) {
-                                // Create an instance of our custom ImagePanel
-                                final ImagePanel imagePanel = new ImagePanel(previewImage);
-
-                                // Put the panel in a scroll pane
-                                JScrollPane scrollPane = new JScrollPane(imagePanel);
-
-                                // Set a reasonable preferred size for the scroll pane itself
-                                int prefWidth = Math.min(1024, previewImage.getWidth()) + 40; // Cap width at 1024px + padding
-                                int prefHeight = Math.min(1024, previewImage.getHeight()) + 40; // Cap height at 1024px + padding
-                                scrollPane.setPreferredSize(new Dimension(prefWidth, prefHeight));
-                                
-                                JDialog previewDialog = new JDialog(SwingUtilities.getWindowAncestor(Panel.this), resource.getString("HomeAssistantFloorPlan.Panel.previewButton.text"), Dialog.ModalityType.APPLICATION_MODAL);
-                                previewDialog.setDefaultCloseOperation(JDialog.DISPOSE_ON_CLOSE);
-                                previewDialog.getContentPane().add(scrollPane);
-                                previewDialog.pack();
-                                previewDialog.setLocationRelativeTo(Panel.this); // Center relative to the main plugin panel
-                                previewDialog.setVisible(true);
+                                showPreviewDialog(previewImage, resource.getString("HomeAssistantFloorPlan.Panel.previewButton.text"));
                             }
                         } catch (InterruptedException ex) {
                             Thread.currentThread().interrupt();
@@ -510,6 +520,7 @@ public class Panel extends JPanel implements DialogView {
                         } finally {
                             previewButton.setEnabled(true);
                             setCursor(Cursor.getDefaultCursor());
+                            updatePreviewDayNightButtonsState(); // Re-evaluate state after main preview is done
                         }
                     }
                 }.execute();
@@ -523,6 +534,181 @@ public class Panel extends JPanel implements DialogView {
                 importerDialog.setVisible(true);
             }
         });
+        actions.put(ActionType.PREVIEW_DAY, new ResourceAction(preferences, Panel.class, ActionType.PREVIEW_DAY.name(), true) {
+            @Override
+            public void actionPerformed(ActionEvent ev) {
+                if (lastCalculatedDayTimestamp == -1) return; // Should not happen if button is enabled
+                previewDayButton.setEnabled(false);
+                setCursor(Cursor.getPredefinedCursor(Cursor.WAIT_CURSOR));
+
+                new SwingWorker<BufferedImage, Void>() {
+                    @Override
+                    protected BufferedImage doInBackground() throws Exception {
+                        return controller.generateBaseImagePreview(lastCalculatedDayTimestamp);
+                    }
+
+                    @Override
+                    protected void done() {
+                        try {
+                            final BufferedImage previewImage = get();
+                            if (previewImage != null) {
+                                showPreviewDialog(previewImage, resource.getString("HomeAssistantFloorPlan.Panel.previewDayButton.text"));
+                            }
+                        } catch (InterruptedException ex) {
+                            Thread.currentThread().interrupt();
+                        } catch (ExecutionException ex) {
+                            Throwable cause = ex.getCause();
+                            String errorMessage = "Error generating day preview: " + (cause != null ? cause.getMessage() : "Unknown error.");
+                            JOptionPane.showMessageDialog(Panel.this, errorMessage, "Preview Error", JOptionPane.ERROR_MESSAGE);
+                            if (cause != null) cause.printStackTrace(); else ex.printStackTrace();
+                        } finally {
+                            previewDayButton.setEnabled(true);
+                            setCursor(Cursor.getDefaultCursor());
+                        }
+                    }
+                }.execute();
+            }
+        });
+        actions.put(ActionType.PREVIEW_NIGHT, new ResourceAction(preferences, Panel.class, ActionType.PREVIEW_NIGHT.name(), true) {
+            @Override
+            public void actionPerformed(ActionEvent ev) {
+                if (lastCalculatedNightTimestamp == -1) return; // Should not happen if button is enabled
+                previewNightButton.setEnabled(false);
+                setCursor(Cursor.getPredefinedCursor(Cursor.WAIT_CURSOR));
+
+                new SwingWorker<BufferedImage, Void>() {
+                    @Override
+                    protected BufferedImage doInBackground() throws Exception {
+                        return controller.generateBaseImagePreview(lastCalculatedNightTimestamp);
+                    }
+
+                    @Override
+                    protected void done() {
+                        try {
+                            final BufferedImage previewImage = get();
+                            if (previewImage != null) {
+                                showPreviewDialog(previewImage, resource.getString("HomeAssistantFloorPlan.Panel.previewNightButton.text"));
+                            }
+                        } catch (InterruptedException ex) {
+                            Thread.currentThread().interrupt();
+                        } catch (ExecutionException ex) {
+                            Throwable cause = ex.getCause();
+                            String errorMessage = "Error generating night preview: " + (cause != null ? cause.getMessage() : "Unknown error.");
+                            JOptionPane.showMessageDialog(Panel.this, errorMessage, "Preview Error", JOptionPane.ERROR_MESSAGE);
+                            if (cause != null) cause.printStackTrace(); else ex.printStackTrace();
+                        } finally {
+                            previewNightButton.setEnabled(true);
+                            setCursor(Cursor.getDefaultCursor());
+                        }
+                    }
+                }.execute();
+            }
+        });
+    }
+
+    private void showPreviewDialog(BufferedImage image, String title) {
+        final ImagePanel imagePanel = new ImagePanel(image);
+        JScrollPane scrollPane = new JScrollPane(imagePanel);
+        int prefWidth = Math.min(1024, image.getWidth()) + 40; // Cap width at 1024px + padding
+        int prefHeight = Math.min(1024, image.getHeight()) + 40; // Cap height at 1024px + padding
+        scrollPane.setPreferredSize(new Dimension(prefWidth, prefHeight));
+        
+        JDialog previewDialog = new JDialog(SwingUtilities.getWindowAncestor(Panel.this), title, Dialog.ModalityType.APPLICATION_MODAL);
+        previewDialog.setDefaultCloseOperation(JDialog.DISPOSE_ON_CLOSE);
+        previewDialog.getContentPane().add(scrollPane);
+        previewDialog.pack();
+        previewDialog.setLocationRelativeTo(Panel.this); // Center relative to the main plugin panel
+        previewDialog.setVisible(true);
+    }
+
+    private void addDayNightTimes() {
+        // Disable button to prevent multiple clicks
+        addDayNightButton.setEnabled(false);
+        setCursor(Cursor.getPredefinedCursor(Cursor.WAIT_CURSOR));
+
+        new SwingWorker<Map<String, Instant>, Void>() {
+            @Override
+            protected Map<String, Instant> doInBackground() throws Exception {
+                Compass compass = controller.getHome().getCompass();
+                double lat = Math.toDegrees(compass.getLatitude());
+                double lon = Math.toDegrees(compass.getLongitude());
+                LocalDate date = ((Date)renderDateSpinner.getValue()).toInstant().atZone(timeZone.toZoneId()).toLocalDate();
+
+                SunriseSunsetApiClient client = new SunriseSunsetApiClient();
+                return client.fetchSunriseSunset(lat, lon, date);
+            }
+
+            @Override
+            protected void done() {
+                try {
+                    Map<String, Instant> sunTimes = get();
+                    
+                    Instant sunrise = sunTimes.get("sunrise");
+                    Instant sunset = sunTimes.get("sunset");
+
+                    // Day time: 30 minutes after sunrise.
+                    long dayTimestamp = sunrise.plusSeconds(1800).toEpochMilli();
+
+                    // Night time: 10 minutes before sunset.
+                    long nightTimestamp = sunset.minusSeconds(600).toEpochMilli();
+                    
+                    // Store the calculated timestamps for preview buttons
+                    Panel.this.lastCalculatedDayTimestamp = dayTimestamp;
+                    Panel.this.lastCalculatedNightTimestamp = nightTimestamp;
+                    controller.setDayTimestamp(dayTimestamp);
+                    controller.setNightTimestamp(nightTimestamp);
+
+                    List<Long> renderingTimes = controller.getRenderDateTimes();
+                    // Use a TreeSet to add new times and keep the list sorted and unique
+                    TreeSet<Long> updatedTimes = new TreeSet<>(renderingTimes);
+                    updatedTimes.add(dayTimestamp);
+                    updatedTimes.add(nightTimestamp);
+
+                    controller.setRenderDateTimes(new ArrayList<>(updatedTimes));
+                    updateRenderingTimesList(false);
+                    updateStartButtonState();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt(); // Restore interrupt status
+                } catch (ExecutionException e) {
+                    Throwable cause = e.getCause();
+                    JOptionPane.showMessageDialog(Panel.this, "Could not fetch sunrise/sunset times: " + cause.getMessage(), "API Error", JOptionPane.ERROR_MESSAGE);
+                    cause.printStackTrace();
+                } finally {
+                    addDayNightButton.setEnabled(true);
+                    updatePreviewDayNightButtonsState(); // Update state after adding times
+                    setCursor(Cursor.getDefaultCursor());
+                }
+            }
+        }.execute();
+    }
+
+    private void updateStartButtonState() {
+        boolean hasOutputDirectory = !outputDirectoryTextField.getText().isEmpty();
+        boolean hasRenderTimes = !renderTimesListModel.isEmpty();
+        startButton.setEnabled(hasOutputDirectory && hasRenderTimes);
+        }
+
+    /**
+     * Updates the enabled state of the "Preview Day" and "Preview Night" buttons.
+     * These buttons are enabled only if the last calculated day/night timestamps
+     * are present in the added times list.
+     */
+    private void updatePreviewDayNightButtonsState() {
+        boolean dayTimePresent = false;
+        boolean nightTimePresent = false;
+
+        if (lastCalculatedDayTimestamp != -1) {
+            dayTimePresent = renderTimesListModel.contains(lastCalculatedDayTimestamp);
+        }
+        if (lastCalculatedNightTimestamp != -1) {
+            nightTimePresent = renderTimesListModel.contains(lastCalculatedNightTimestamp);
+        }
+
+        // Enable buttons only if their respective timestamps are in the list
+        // and the main preview button is also enabled (implies controller is ready)
+        boolean mainPreviewEnabled = previewButton.isEnabled();
+        previewDayButton.setEnabled(mainPreviewEnabled && dayTimePresent);
+        previewNightButton.setEnabled(mainPreviewEnabled && nightTimePresent);
     }
 
     private void showBrowseDialog() {
@@ -858,7 +1044,7 @@ public class Panel extends JPanel implements DialogView {
         renderDateSpinner = new JSpinner(dateModel);
         final JSpinner.DateEditor dateEditor = new JSpinner.DateEditor(renderDateSpinner);
         dateEditor.getFormat().setTimeZone(timeZone);
-        dateEditor.getFormat().applyPattern("dd/MM/yyyy");
+        dateEditor.getFormat().applyPattern("yyyy-MM-dd");
         renderDateSpinner.setEditor(dateEditor);
         final DateFormatter dateFormatter = (DateFormatter)dateEditor.getTextField().getFormatter();
         dateFormatter.setAllowsInvalid(false);
@@ -879,6 +1065,9 @@ public class Panel extends JPanel implements DialogView {
         timeFormatter.setOverwriteMode(true);        
         renderTimeAddButton = new JButton(actionMap.get(ActionType.ADD_RENDER_TIME));
         renderTimeAddButton.setText(resource.getString("HomeAssistantFloorPlan.Panel.addTimeButton.text"));
+
+        addDayNightButton = new JButton(actionMap.get(ActionType.ADD_DAY_NIGHT));
+        addDayNightButton.setText(resource.getString("HomeAssistantFloorPlan.Panel.addDayNightButton.text"));
 
         // This listener updates the selected time in the list when the spinner is changed.
         renderTimeSpinner.addChangeListener(new ChangeListener() {
@@ -913,6 +1102,17 @@ public class Panel extends JPanel implements DialogView {
                     }
 
                     if (!alreadyExists) {
+                        // If the timestamp we are about to change was the designated Day/Night time,
+                        // update the designation to point to the new timestamp.
+                        if (selectedTimestamp.equals(lastCalculatedDayTimestamp)) {
+                            lastCalculatedDayTimestamp = updatedTimestamp;
+                            controller.setDayTimestamp(updatedTimestamp);
+                        }
+                        if (selectedTimestamp.equals(lastCalculatedNightTimestamp)) {
+                            lastCalculatedNightTimestamp = updatedTimestamp;
+                            controller.setNightTimestamp(updatedTimestamp);
+                        }
+
                         currentRenderingTimes.set(selectedIndex, updatedTimestamp);
                         controller.setRenderDateTimes(new ArrayList<>(new TreeSet<>(currentRenderingTimes)));
                         updateRenderingTimesList(false);
@@ -931,8 +1131,16 @@ public class Panel extends JPanel implements DialogView {
         renderTimesList.setAutoscrolls(true);
         renderTimesList.setCellRenderer(new DefaultListCellRenderer() {
             @Override
-            public Component getListCellRendererComponent(JList<?> list, Object value, int index, boolean isSelected, boolean cellHasFocus) {
-                return super.getListCellRendererComponent(list, timeEditor.getFormat().format(Date.from(Instant.ofEpochMilli((Long) value).atZone(timeZone.toZoneId()).toInstant())), index, isSelected, cellHasFocus);
+            public Component getListCellRendererComponent(JList<?> list, Object value, int index, boolean isSelected, boolean cellHasFocus) { // Increased precision to .4f
+                String text = timeEditor.getFormat().format(Date.from(Instant.ofEpochMilli((Long) value).atZone(timeZone.toZoneId()).toInstant()));
+                if (value.equals(lastCalculatedDayTimestamp)) {
+                    text += " (Day)";
+                } else if (value.equals(lastCalculatedNightTimestamp)) {
+                    text += " (Night)";
+                }
+                Component rendererComponent = super.getListCellRendererComponent(list, text, index, isSelected, cellHasFocus);
+                // Optionally, you can set a tooltip here if needed
+                return rendererComponent;
             }
         });
         // This listener updates the spinner when a time is selected in the list.
@@ -946,7 +1154,6 @@ public class Panel extends JPanel implements DialogView {
                 }
             }
         });
-        updateRenderingTimesList(true);
 
         imageFormatLabel = new JLabel();
         imageFormatLabel.setText(resource.getString("HomeAssistantFloorPlan.Panel.imageFormatLabel.text"));
@@ -990,14 +1197,14 @@ public class Panel extends JPanel implements DialogView {
         outputDirectoryLabel = new JLabel();
         outputDirectoryLabel.setText(resource.getString("HomeAssistantFloorPlan.Panel.outputDirectoryLabel.text"));
         outputDirectoryTextField = new JTextField();
-        outputDirectoryTextField.setText(controller.getOutputDirectory());
+        outputDirectoryTextField.setText(controller.getOutputDirectory()); // Set initial text
         outputDirectoryTextField.getDocument().addDocumentListener(new SimpleDocumentListener() {
             @Override
             public void executeUpdate(DocumentEvent e) {
-                startButton.setEnabled(!outputDirectoryTextField.getText().isEmpty());
+                updateStartButtonState();
                 controller.setOutputDirectory(outputDirectoryTextField.getText());
             }
-        });
+        }); // Add listener after setting initial text to avoid premature firing
         outputDirectoryBrowseButton = new JButton(actionMap.get(ActionType.BROWSE));
         outputDirectoryBrowseButton.setText(resource.getString("HomeAssistantFloorPlan.Panel.browseButton.text"));
         outputDirectoryChooser = new FileContentManager(preferences);
@@ -1026,12 +1233,16 @@ public class Panel extends JPanel implements DialogView {
 
         startButton = new JButton(actionMap.get(ActionType.START));
         startButton.setText(resource.getString("HomeAssistantFloorPlan.Panel.startButton.text"));
-        startButton.setEnabled(!outputDirectoryTextField.getText().isEmpty());
         closeButton = new JButton(actionMap.get(ActionType.CLOSE));
         closeButton.setText(resource.getString("HomeAssistantFloorPlan.Panel.closeButton.text"));
 
         previewButton = new JButton(actionMap.get(ActionType.PREVIEW));
         previewButton.setText(resource.getString("HomeAssistantFloorPlan.Panel.previewButton.text"));
+
+        previewDayButton = new JButton(actionMap.get(ActionType.PREVIEW_DAY));
+        previewDayButton.setText(resource.getString("HomeAssistantFloorPlan.Panel.previewDayButton.text"));
+        previewNightButton = new JButton(actionMap.get(ActionType.PREVIEW_NIGHT));
+        previewNightButton.setText(resource.getString("HomeAssistantFloorPlan.Panel.previewNightButton.text"));
 
         importEntitiesButton = new JButton(actionMap.get(ActionType.IMPORT_FROM_HA));
         try {
@@ -1040,6 +1251,10 @@ public class Panel extends JPanel implements DialogView {
             // Provide a fallback text if the resource key is not found.
             importEntitiesButton.setText("Import from HA...");
         }
+
+        // Update list and dependent buttons now that all components are created
+        updateRenderingTimesList(true);
+        updateStartButtonState();
     }
 
     private void setComponentsEnabled(boolean enabled) {
@@ -1055,12 +1270,16 @@ public class Panel extends JPanel implements DialogView {
         renderTimeSpinner.setEnabled(enabled);
         renderTimeAddButton.setEnabled(enabled);
         renderTimeRemoveButton.setEnabled(enabled);
+        addDayNightButton.setEnabled(enabled);
         renderTimesList.setEnabled(enabled);;
         imageFormatComboBox.setEnabled(enabled);
         outputDirectoryTextField.setEnabled(enabled);
         outputDirectoryBrowseButton.setEnabled(enabled);
         useExistingRendersCheckbox.setEnabled(enabled);
         previewButton.setEnabled(enabled);
+        previewDayButton.setEnabled(enabled); // Initial state, will be refined by updatePreviewDayNightButtonsState
+        previewNightButton.setEnabled(enabled); // Initial state, will be refined by updatePreviewDayNightButtonsState
+        
         importEntitiesButton.setEnabled(enabled);
         if (enabled) {
             startButton.setAction(getActionMap().get(ActionType.START));
@@ -1209,7 +1428,8 @@ public class Panel extends JPanel implements DialogView {
         addRemoveButtonsPanel.add(renderTimeAddButton, new GridBagConstraints(
             0, 0, 1, 1, 0, 0, GridBagConstraints.CENTER, GridBagConstraints.HORIZONTAL, new Insets(0,0,standardGap,0), 0, 0));
         addRemoveButtonsPanel.add(renderTimeRemoveButton, new GridBagConstraints(
-            0, 1, 1, 1, 0, 0, GridBagConstraints.CENTER, GridBagConstraints.HORIZONTAL, new Insets(0,0,0,0), 0, 0));
+            0, 1, 1, 1, 0, 0, GridBagConstraints.CENTER, GridBagConstraints.HORIZONTAL, new Insets(0,0,standardGap,0), 0, 0));
+        addRemoveButtonsPanel.add(addDayNightButton, new GridBagConstraints(0, 2, 1, 1, 0, 0, GridBagConstraints.CENTER, GridBagConstraints.HORIZONTAL, new Insets(0,0,0,0), 0, 0));
         timesListPanel.add(addRemoveButtonsPanel, java.awt.BorderLayout.EAST);
         add(timesListPanel, new GridBagConstraints(
             1, currentGridYIndex, 3, 1, 1.0, 0.0, GridBagConstraints.LINE_START,
@@ -1242,10 +1462,14 @@ public class Panel extends JPanel implements DialogView {
         currentGridYIndex++;
 
         // Panel for bottom buttons
-        JPanel bottomButtonPanel = new JPanel(new GridBagLayout());
+        JPanel bottomButtonPanel = new JPanel(new GridBagLayout()); // Increased precision to .4f
         bottomButtonPanel.add(importEntitiesButton, new GridBagConstraints(0, 0, 1, 1, 0.0, 0, GridBagConstraints.LINE_START, GridBagConstraints.NONE, new Insets(0,0,0,standardGap), 0, 0));
-        bottomButtonPanel.add(previewButton, new GridBagConstraints(1, 0, 1, 1, 1.0, 0, GridBagConstraints.LINE_START, GridBagConstraints.NONE, new Insets(0,0,0,0), 0, 0));
-        add(bottomButtonPanel, new GridBagConstraints(
+        bottomButtonPanel.add(previewButton, new GridBagConstraints(1, 0, 1, 1, 0.33, 0, GridBagConstraints.LINE_START, GridBagConstraints.NONE, new Insets(0,0,0,standardGap), 0, 0));
+        bottomButtonPanel.add(previewDayButton, new GridBagConstraints(2, 0, 1, 1, 0.33, 0, GridBagConstraints.LINE_START, GridBagConstraints.NONE, new Insets(0,0,0,standardGap), 0, 0));
+        bottomButtonPanel.add(previewNightButton, new GridBagConstraints(3, 0, 1, 1, 0.34, 0, GridBagConstraints.LINE_START, GridBagConstraints.NONE, new Insets(0,0,0,0), 0, 0));
+        
+        // Initial update of button states
+        updatePreviewDayNightButtonsState();        add(bottomButtonPanel, new GridBagConstraints(
             0, currentGridYIndex, 4, 1, 1.0, 0, GridBagConstraints.LINE_START,
             GridBagConstraints.HORIZONTAL, insets, 0, 0));
     }
@@ -1331,6 +1555,7 @@ public class Panel extends JPanel implements DialogView {
         renderTimesListModel.clear();
         for (Long renderingTime : renderingTimes)
             renderTimesListModel.addElement(renderingTime);
+        updatePreviewDayNightButtonsState(); // Update button states after list changes
     }
 
     private void changeDatesForAllRenderingTimes() {

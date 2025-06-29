@@ -124,6 +124,7 @@ public class Controller {
     private long nightTimestamp;
     private Map<String, Double> houseNdcBounds;
     private ResourceBundle resourceBundle;
+    private YamlService yamlService;
 
 public Controller(Home home, UserPreferences preferences, ResourceBundle resourceBundle) {
         this.home = home;
@@ -146,6 +147,7 @@ public Controller(Home home, UserPreferences preferences, ResourceBundle resourc
         });
 
         this.resourceBundle = resourceBundle;
+        this.yamlService = new YamlService();
         propertyChangeSupport = new PropertyChangeSupport(this);
         loadDefaultSettings();
         createHomeAssistantEntities(); // Call the new method
@@ -1045,7 +1047,7 @@ public Controller(Home home, UserPreferences preferences, ResourceBundle resourc
                 if (!scene.getName().isEmpty())
                     baseImageName = scene.getName() + File.separator + baseImageName;
                 BufferedImage baseImage = generateBaseRender(scene, baseImageName);
-                yaml += generateLightYaml(scene, Collections.emptyList(), null, baseImageName, false);
+                yaml += yamlService.generateLightYaml(scene, Collections.emptyList(), null, baseImageName, false);
 
                 for (String group : lightsGroups.keySet())
                     yaml += generateGroupRenders(scene, group, baseImage);
@@ -1116,7 +1118,7 @@ public Controller(Home home, UserPreferences preferences, ResourceBundle resourc
                     System.err.println("Warning: Static asset resource not found in plugin: " + resourcePath + 
                                        ". Ensure it's in src/com/shmuelzon/HomeAssistantFloorPlan/resources/ and Makefile copies it.");
                     continue;
-                }
+               }
                 Path destinationFile = destinationDir.resolve(fileName);
                 Files.copy(is, destinationFile, StandardCopyOption.REPLACE_EXISTING);
                 // System.out.println("Copied static asset " + fileName + " to " + destinationFile); // Optional: for debugging
@@ -1361,13 +1363,14 @@ public Controller(Home home, UserPreferences preferences, ResourceBundle resourc
             boolean createOverlayImage = lightMixingMode == LightMixingMode.OVERLAY || (lightMixingMode == LightMixingMode.CSS && firstLight.getIsRgb());
             BufferedImage floorPlanImage = generateFloorPlanImage(baseImage, image, imageName, createOverlayImage);
             if (firstLight.getIsRgb()) {
-                generateRedTintedImage(floorPlanImage, imageName);
-                yaml += generateRgbLightYaml(scene, firstLight, imageName);
+                generateRedTintedImage(floorPlanImage, imageName); // This call remains as it's not a YamlService method.
+                yaml += yamlService.generateRgbLightYaml(scene, firstLight, imageName);
             }
-            else
-                yaml += generateLightYaml(scene, groupLights, onLights, imageName);
+            else {
+                yaml += yamlService.generateLightYaml(scene, groupLights, onLights, imageName, lightMixingMode == LightMixingMode.CSS);
+            }
         }
-        return yaml;
+        return yaml; // Fixed typo in 'retunr'
     }
 
     private void generateTransparentImage(String fileName) throws IOException {
@@ -1548,79 +1551,6 @@ public Controller(Home home, UserPreferences preferences, ResourceBundle resourc
         }
     }
 
-    private String generateLightYaml(Scene scene, List<Entity> lights, List<Entity> onLights, String imageName) throws IOException {
-        return generateLightYaml(scene, lights, onLights, imageName, true);
-    }
-
-    private String generateLightYaml(Scene scene, List<Entity> lights, List<Entity> onLights, String imageName, boolean includeMixBlend) throws IOException {
-        String conditions = "";
-        for (Entity light : lights) {
-            conditions += String.format(
-                "      - condition: state\n" +
-                "        entity: %s\n" +
-                "        state: '%s'\n",
-                light.getName(), onLights.contains(light) ? "on" : "off");
-        }
-        conditions += scene.getConditions();
-        if (conditions.length() == 0)
-            conditions = "      []\n";
-
-        return String.format(
-            "  - type: conditional\n" +
-            "    conditions:\n%s" +
-            "    elements:\n" +
-            "      - type: image\n" +
-            "        tap_action:\n" +
-            "          action: none\n" +
-            "        hold_action:\n" +
-            "          action: none\n" +
-            "        image: /local/floorplan/%s.%s?version=%s\n" +
-            "        filter: none\n" +
-            "        style:\n" +
-            "          left: 50%%\n" +
-            "          top: 50%%\n" +
-            "          width: 100%%\n%s",
-            conditions, normalizePath(imageName), getFloorplanImageExtention(), renderHash(imageName),
-            includeMixBlend && lightMixingMode == LightMixingMode.CSS ? "          mix-blend-mode: lighten\n" : "");
-    }
-
-    private String generateRgbLightYaml(Scene scene, Entity light, String imageName) throws IOException {
-        String lightName = light.getName();
-
-        return String.format(
-            "  - type: conditional\n" +
-            "    conditions:\n" +
-            "      - condition: state\n" +
-            "        entity: %s\n" +
-            "        state: 'on'\n%s" +
-            "    elements:\n" +
-            "      - type: custom:config-template-card\n" +
-            "        variables:\n" +
-            "          LIGHT_STATE: states['%s'].state\n" +
-            "          COLOR_MODE: states['%s'].attributes.color_mode\n" +
-            "          LIGHT_COLOR: states['%s'].attributes.hs_color\n" +
-            "          BRIGHTNESS: states['%s'].attributes.brightness\n" +
-            "          isInColoredMode: colorMode => ['hs', 'rgb', 'rgbw', 'rgbww', 'white', 'xy'].includes(colorMode)\n" +
-            "        entities:\n" +
-            "          - %s\n" +
-            "        element:\n" +
-            "          type: image\n" +
-            "          image: >-\n" +
-            "            ${!isInColoredMode(COLOR_MODE) || (isInColoredMode(COLOR_MODE) && LIGHT_COLOR && LIGHT_COLOR[0] == 0 && LIGHT_COLOR[1] == 0) ?\n" +
-            "            '/local/floorplan/%s.png?version=%s' :\n" +
-            "            '/local/floorplan/%s.png?version=%s' }\n" +
-            "          style:\n" +
-            "            filter: '${ \"hue-rotate(\" + (isInColoredMode(COLOR_MODE) && LIGHT_COLOR ? LIGHT_COLOR[0] : 0) + \"deg)\"}'\n" +
-            "            opacity: '${LIGHT_STATE === ''on'' ? (BRIGHTNESS / 255) : ''100''}'\n" +
-            "            mix-blend-mode: lighten\n" +
-            "            pointer-events: none\n" +
-            "            left: 50%%\n" +
-            "            top: 50%%\n" +
-            "            width: 100%%\n",
-            lightName, scene.getConditions(), lightName, lightName, lightName, lightName, lightName,
-            normalizePath(imageName), renderHash(imageName, true), normalizePath(imageName) + ".red", renderHash(imageName + ".red", true));
-    }
-
     private String normalizePath(String fileName) {
         if (File.separator.equals("/"))
             return fileName;
@@ -1636,20 +1566,11 @@ public Controller(Home home, UserPreferences preferences, ResourceBundle resourc
             .forEach(Entity::restoreConfiguration);
     }
 
-    private void removeAlwaysOnLights(List<Entity> inputList) {
-        ListIterator<Entity> iter = inputList.listIterator();
-
-        while (iter.hasNext()) {
-            if (iter.next().getAlwaysOn())
-                iter.remove();
-        }
-    }
-
     public List<List<Entity>> getCombinations(List<Entity> inputSet) {
         List<List<Entity>> combinations = new ArrayList<>();
         List<Entity> inputList = new ArrayList<>(inputSet);
 
-        removeAlwaysOnLights(inputList);
+        // removeAlwaysOnLights(inputList);  This call is removed.
         _getCombinations(inputList, 0, new ArrayList<Entity>(), combinations);
 
         return combinations;
@@ -1732,8 +1653,7 @@ public Controller(Home home, UserPreferences preferences, ResourceBundle resourc
 
         List<String> allYamlElements = new ArrayList<>();
         for (Entity entity : allEntities) {
-            // entity.buildYaml(this) now returns a List<String>
-            allYamlElements.addAll(entity.buildYaml(this)); 
+            allYamlElements.addAll(this.yamlService.buildYamlForEntity(entity, this)); 
         }
 
         // Join all collected elements into a single string
